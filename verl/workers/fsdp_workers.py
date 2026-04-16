@@ -89,7 +89,7 @@ def get_sharding_strategy(device_mesh):
     from torch.distributed.fsdp import ShardingStrategy
 
     if device_mesh.ndim == 1:
-        sharding_strategy = ShardingStrategy.FULL_SHARD
+        sharding_strategy = ShardingStrategy.SHARD_GRAD_OP # modified to zero-2!!!
     elif device_mesh.ndim == 2:
         sharding_strategy = ShardingStrategy.HYBRID_SHARD
     else:

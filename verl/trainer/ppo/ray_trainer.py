@@ -1077,7 +1077,7 @@ class RayPPOTrainer:
                         #     self.async_rollout_manager.wake_up()
                         #     gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
                         #     self.async_rollout_manager.sleep()
-
+                        print("multi-turn rollout!!")
                         ################ agent-environment loop ###############
                         gen_batch_output = self.traj_collector.multi_turn_loop(
                                                                 gen_batch=gen_batch,
@@ -1246,6 +1246,7 @@ class RayPPOTrainer:
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
                         with _timer("update_actor", timing_raw):
+                            print("update actor!!")
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])

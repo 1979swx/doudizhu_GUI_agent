@@ -83,3 +83,68 @@ def sokoban_projection(actions: List[str]):
             valids[i] = 0
 
     return actions, valids
+
+
+def extract_tag(text: str, tag: str):
+    pattern = rf"<{tag}>(.*?)</{tag}>"
+    match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+    if match is None:
+        return -1
+    return match.group(1).strip()
+
+def sokoban_projection_my_modification(actions: List[str]):
+    """
+    A function to process the actions.
+    actions: the list of actions to be processed, it is a list of strings.
+    Expected format:
+        <think>some reasoning...</think><action>up/down/left/right/still</action>
+        <chat>some chat...</chat><memory>some memory...</memory>
+    Sokoban action mappings:
+    - 0: Still (Invalid Action)
+    - 1: Up
+    - 2: Down
+    - 3: Left
+    - 4: Right
+    """
+
+    action_pools = {
+        "up": 1,
+        "down": 2,
+        "left": 3,
+        "right": 4,
+        "still": 0,
+    }
+
+    valids = [0] * len(actions)
+
+    for i in range(len(actions)):
+        original_str = actions[i]  # keep the original string
+        actions[i] = actions[i].lower()
+
+        # Attempt to extract the substring within <action>...</action>
+        action_tag = "action"
+        think_tag = "think"
+        chat_tag = "chat"
+        memory_tag = "memory"
+        try:
+            extracted_action = extract_tag(actions[i], action_tag)
+            if extracted_action == -1:
+                actions[i] = 0
+                continue
+            elif extracted_action in action_pools:
+                actions[i] = action_pools[extracted_action]
+                valids[i] = 1
+            else:
+                actions[i] = 0
+
+            if extract_tag(original_str, think_tag) == -1:
+                valids[i] = 0
+            if extract_tag(original_str, chat_tag) == -1:
+                valids[i] = 0
+            if extract_tag(original_str, memory_tag) == -1:
+                valids[i] = 0
+        except:
+            # randomly choose an action from the action list if illegal
+            actions[i] = 0
+
+    return actions, valids
