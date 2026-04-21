@@ -17,7 +17,7 @@
 -> `SimpleMemory`
 -> `prompt template`
 -> `rollout_loop`
--> `apply_invalid_action_penalty`
+-> `apply_projection_invalid_penalty`
 
 ---
 
@@ -170,10 +170,10 @@ run_sokoban.sh
 模型输出原始文本
 -> projection.py 提取 <action>
 -> projection.py 给出 valids
--> EnvironmentManager.step 写入 info['is_action_valid']
+-> EnvironmentManager.step 写入 info['is_projection_valid']
 -> rollout_loop 挂到 batch.non_tensor_batch
--> ray_trainer.apply_invalid_action_penalty()
--> episode/valid_action_ratio
+-> ray_trainer.apply_projection_invalid_penalty()
+-> episode/projection_valid_ratio
 ```
 
 这条链回答的问题是：
@@ -214,8 +214,8 @@ sed -n '1,220p' examples/grpo_trainer/run_sokoban.sh
 你今天只盯这几个配置：
 
 1. `algorithm.adv_estimator=grpo`
-2. `actor_rollout_ref.actor.use_invalid_action_penalty=True`
-3. `actor_rollout_ref.actor.invalid_action_penalty_coef=0.1`
+2. `actor_rollout_ref.actor.use_projection_invalid_penalty=True`
+3. `actor_rollout_ref.actor.projection_invalid_penalty_coef=0.1`
 4. `env.env_name=Sokoban`
 5. `env.max_steps=15`
 6. `env.rollout.n=$group_size`
@@ -423,7 +423,7 @@ sed -n '220,360p' agent_system/environments/env_manager.py
 
 1. 先 `actions, valids = self.projection_f(text_actions)`
 2. 再 `next_obs, rewards, dones, infos = self.envs.step(actions)`
-3. 再把 `info['is_action_valid']` 填进去
+3. 再把 `info['is_projection_valid']` 填进去
 4. 再把上一步观测和动作存进 `memory`
 5. 再构造下一轮 agent 要看到的 observation dict
 
@@ -494,7 +494,7 @@ bash examples/grpo_trainer/run_sokoban.sh \
 
 1. Hydra 配置里 `env.rollout.n=4` 是否真的生效。
 2. Hydra 配置里 `data.train_batch_size=4` 是否真的生效。
-3. `episode/valid_action_ratio` 有没有出现。
+3. `episode/projection_valid_ratio` 有没有出现。
 4. `timing_s/gen` 或其他吞吐日志是不是开始出现。
 5. 整个系统是不是明显比 Day 1 的纯文本环境更吃资源。
 
@@ -573,7 +573,7 @@ sed -n '1,220p' agent_system/environments/env_package/alfworld/projection.py
 答案就是：
 
 1. 因为格式错误要尽早暴露。
-2. 因为上层 trainer 需要统一拿到 `is_action_valid`。
+2. 因为上层 trainer 需要统一拿到 `is_projection_valid`。
 3. 因为环境只知道“这个动作能不能执行”，但不一定知道“模型有没有遵守你的输出协议”。
 
 ## 5.2 读 `env_manager.step()`，看 `valids` 是怎样被挂进 info 的
@@ -581,7 +581,7 @@ sed -n '1,220p' agent_system/environments/env_package/alfworld/projection.py
 执行：
 
 ```bash
-rg -n "info\\['is_action_valid'\\]|info\\[\"is_action_valid\"\\]" agent_system/environments/env_manager.py agent_system/environments/base.py
+rg -n "info\\['is_projection_valid'\\]|info\\[\"is_projection_valid\"\\]" agent_system/environments/env_manager.py agent_system/environments/base.py
 sed -n '1,120p' agent_system/environments/base.py
 sed -n '240,520p' agent_system/environments/env_manager.py
 ```
@@ -591,20 +591,20 @@ sed -n '240,520p' agent_system/environments/env_manager.py
 `projection.py` 返回的 `valids` 并不会停留在 env manager 内部，而是会被写进每个 step 的 `info`：
 
 ```text
-info['is_action_valid'] = to_numpy(valids[i])
+info['is_projection_valid'] = to_numpy(valids[i])
 ```
 
 这一步的价值是：
 
 1. 环境层和 trainer 层解耦了
-2. 只要 manager 按统一接口写 `info['is_action_valid']`
+2. 只要 manager 按统一接口写 `info['is_projection_valid']`
 3. 上层 rollout/trainer 就不需要知道你具体是什么环境
 
 这就是工业级代码常见的设计风格：
 
 底层环境可以不同，但中间接口必须统一。
 
-## 5.3 读 `rollout_loop.py` 和 `apply_invalid_action_penalty()`，把整条链闭合
+## 5.3 读 `rollout_loop.py` 和 `apply_projection_invalid_penalty()`，把整条链闭合
 
 执行：
 
@@ -617,12 +617,12 @@ sed -n '1188,1215p' verl/trainer/ppo/ray_trainer.py
 你必须顺着这条链解释：
 
 1. `envs.step(text_actions)` 返回 `infos`
-2. rollout loop 发现 `infos[0]` 里有 `is_action_valid`
-3. 它把这一列塞进 `batch.non_tensor_batch['is_action_valid']`
-4. trainer 里 `apply_invalid_action_penalty()` 读取这列
+2. rollout loop 发现 `infos[0]` 里有 `is_projection_valid`
+3. 它把这一列塞进 `batch.non_tensor_batch['is_projection_valid']`
+4. trainer 里 `apply_projection_invalid_penalty()` 读取这列
 5. 它在 response 最后一个有效 token 的 reward 上减去惩罚
 6. 同时记录指标：
-   `episode/valid_action_ratio`
+   `episode/projection_valid_ratio`
 
 ### 这里最该记住的不是代码细节，而是奖励链路位置
 
@@ -643,7 +643,7 @@ sed -n '1188,1215p' verl/trainer/ppo/ray_trainer.py
 
 1. 一方面，projection 把非法格式动作映射成 `0`
 2. 另一方面，Sokoban 底层环境把 `0` 定义为 invalid action，并且环境本身有 `PENALTY_FOR_INVALID = -1`
-3. 然后 trainer 还会再额外减一层 `invalid_action_penalty_coef`
+3. 然后 trainer 还会再额外减一层 `projection_invalid_penalty_coef`
 
 这意味着：
 
@@ -663,7 +663,7 @@ sed -n '1188,1215p' verl/trainer/ppo/ray_trainer.py
 
 1. 故意让模型输出缺少 `<think>` 或 `<action>`
 2. 观察 `projection.py` 如何把它判成 invalid
-3. 观察 `episode/valid_action_ratio` 和 reward 的变化
+3. 观察 `episode/projection_valid_ratio` 和 reward 的变化
 
 这里我建议你不要赌模型“自然犯错”，而是主动制造一个更可控的格式失配实验。
 
@@ -705,7 +705,7 @@ bash examples/grpo_trainer/run_sokoban.sh \
 
 记下这 3 个基线现象：
 
-1. `episode/valid_action_ratio`
+1. `episode/projection_valid_ratio`
 2. `episode/reward/mean`
 3. 生成输出里是否大体遵守 `<think><action>` 格式
 
@@ -740,7 +740,7 @@ Do not output <think> or <action>.
 
 你大概率会看到：
 
-1. `episode/valid_action_ratio` 明显下降
+1. `episode/projection_valid_ratio` 明显下降
 2. reward 变差
 3. 即使环境还能继续 step，trainer 侧也会记录更多 invalid action
 
@@ -777,7 +777,7 @@ Do not output <think> or <action>.
 
 1. 你在 projection 层直接收紧动作空间
 2. 即使环境本身还能接受更多动作，projection 也会先把它们判成 invalid
-3. 你可以观察 `valid_action_ratio` 是否上升或下降，以及 reward 如何变化
+3. 你可以观察 `projection_valid_ratio` 是否上升或下降，以及 reward 如何变化
 
 这一步帮助你理解：
 
@@ -1152,7 +1152,7 @@ def extract_tag(text: str, tag: str):
 
 1. `reset()` 时统一 observation 结构
 2. `step()` 时先走 projection，再走 env
-3. 把 `is_action_valid` 挂进 `info`
+3. 把 `is_projection_valid` 挂进 `info`
 4. 在 step 之间维护 memory
 5. 把历史、任务、可选动作等组织成最终 prompt
 
@@ -1197,10 +1197,10 @@ def extract_tag(text: str, tag: str):
 ```text
 model output
 -> projection
--> is_action_valid
+-> is_projection_valid
 -> rollout_loop
 -> invalid penalty
--> valid_action_ratio
+-> projection_valid_ratio
 ```
 
 并能解释每一层的职责边界。
@@ -1236,7 +1236,7 @@ model output
 
 1. projection 解决的是输出协议合法性
 2. 环境更关注执行合法性
-3. projection 层早判错，trainer 才能稳定记录 `is_action_valid`
+3. projection 层早判错，trainer 才能稳定记录 `is_projection_valid`
 4. 这样 reward penalty 链更统一，跨环境更容易复用
 
 ### 2. 如果你把 `history_length` 调大，最可能先炸的是哪里：显存、吞吐、还是 reward 稳定性？为什么？
@@ -1276,13 +1276,13 @@ model output
 4. 允许额外字段如 `<chat>` `<memory>` 存在
 5. 不应该在这里承担全部环境逻辑或奖励逻辑
 
-### 6. 如果训练时 `valid_action_ratio` 很低，你应该优先查哪 4 个地方？
+### 6. 如果训练时 `projection_valid_ratio` 很低，你应该优先查哪 4 个地方？
 
 答题抓手：
 
 1. prompt 有没有把输出协议写清楚
 2. projection 是否过严或有 bug
-3. env manager 是否正确透传 `is_action_valid`
+3. env manager 是否正确透传 `is_projection_valid`
 4. trainer 是否开启了 invalid action penalty，以及惩罚是否过重
 
 ---

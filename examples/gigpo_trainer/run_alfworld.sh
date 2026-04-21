@@ -48,8 +48,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    actor_rollout_ref.actor.use_invalid_action_penalty=True \
-    actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
+    actor_rollout_ref.actor.use_projection_invalid_penalty=True \
+    actor_rollout_ref.actor.projection_invalid_penalty_coef=0.1 \
     algorithm.use_kl_in_reward=False \
     algorithm.gamma=0.95 \
     algorithm.gigpo.step_advantage_w=1.0 \

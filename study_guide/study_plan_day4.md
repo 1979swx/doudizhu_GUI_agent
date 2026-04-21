@@ -145,7 +145,7 @@ bash examples/grpo_trainer/run_sokoban.sh \
 2. GPU 显存占用大致区间。
 3. CPU 是否明显吃满。
 4. 控制台里训练是卡在 rollout 前后，还是卡在 update actor 前后。
-5. `episode/valid_action_ratio` 是否明显低。
+5. `episode/projection_valid_ratio` 是否明显低。
 6. `val/*/test_score` 是否几乎没信号。
 
 #### 这一轮跑完后，你必须立刻回答 3 个问题
@@ -238,7 +238,7 @@ bash examples/grpo_trainer/run_sokoban.sh \
 1. prompt 组织；
 2. memory 拼接；
 3. action projection；
-4. 合法性标记 `is_action_valid`；
+4. 合法性标记 `is_projection_valid`；
 5. 某些环境里的 `available_actions` 注入。
 
 所以当训练“能跑但没效果”时，不要只盯 loss。很多时候第一层问题就在这里。
@@ -305,7 +305,7 @@ bash examples/grpo_trainer/run_sokoban.sh \
 
 今天只做一个保守动作：把 `ppo_micro_batch_size_per_gpu` 从 2 提到 4，其他不动，看看 update 端是否明显变快。
 
-#### 情况 D：训练速度还行，但 reward / valid_action_ratio 看起来像死水
+#### 情况 D：训练速度还行，但 reward / projection_valid_ratio 看起来像死水
 
 这说明你上午最重要的瓶颈不是吞吐，而是统计有效性。那就不要继续卷资源调优，下午尽快进入 DAPO / GiGPO / 奖励设计。
 
@@ -607,7 +607,7 @@ bash examples/gigpo_dynamic_trainer/run_sokoban.sh \
 
 预计用时：10 分钟
 
-默认训练链路里，`apply_invalid_action_penalty()` 会在 reward manager 之后，基于 `is_action_valid` 再减一次 penalty。
+默认训练链路里，`apply_projection_invalid_penalty()` 会在 reward manager 之后，基于 `is_projection_valid` 再减一次 penalty。
 
 如果你今晚自己又在 `EpisodeRewardManager` 里额外写了“合法加分 / 非法减分”，而又忘了关默认 penalty，就会出现双重计分。
 
@@ -619,7 +619,7 @@ bash examples/gigpo_dynamic_trainer/run_sokoban.sh \
 今晚训练命令里记得加：
 
 ```bash
-actor_rollout_ref.actor.use_invalid_action_penalty=False
+actor_rollout_ref.actor.use_projection_invalid_penalty=False
 ```
 
 这是非常典型的工业级调试意识：**做实验时先让 reward 归因单一、可解释，不要同时开两套重叠机制。**
@@ -656,14 +656,14 @@ actor_rollout_ref.actor.use_invalid_action_penalty=False
 
 1. `response_str`
 2. `episode_rewards`
-3. `is_action_valid`
+3. `is_projection_valid`
 4. 你自己算出的 `format_reward`
 
 其中：
 
 1. `response_str` 已经在 `EpisodeRewardManager` 里 decode 了。
 2. `episode_rewards` 已经在 `data_item.non_tensor_batch['episode_rewards']` 里。
-3. `is_action_valid` 已经在 rollout loop 里塞进 `non_tensor_batch` 了。
+3. `is_projection_valid` 已经在 rollout loop 里塞进 `non_tensor_batch` 了。
 
 #### 10.2 你可以按这个思路改
 
@@ -674,8 +674,8 @@ has_think = ("<think>" in response_str) and ("</think>" in response_str)
 has_action = ("<action>" in response_str) and ("</action>" in response_str)
 format_reward = 0.05 if (has_think and has_action) else 0.0
 
-is_action_valid = bool(data_item.non_tensor_batch["is_action_valid"])
-legality_reward = 0.05 if is_action_valid else -0.05
+is_projection_valid = bool(data_item.non_tensor_batch["is_projection_valid"])
+legality_reward = 0.05 if is_projection_valid else -0.05
 
 env_reward = float(episode_rewards)
 score = env_reward + format_reward + legality_reward
@@ -699,7 +699,7 @@ score = env_reward + format_reward + legality_reward
 3. `legality_reward`
 4. `final_reward`
 5. `has_think_action`
-6. `is_action_valid`
+6. `is_projection_valid`
 
 这样训练主循环会拿到这些字段，你至少能在本地看到：
 
@@ -715,7 +715,7 @@ print({
     "format_reward": format_reward,
     "legality_reward": legality_reward,
     "final_reward": score,
-    "is_action_valid": is_action_valid,
+    "is_projection_valid": is_projection_valid,
 })
 ```
 
@@ -772,14 +772,14 @@ bash examples/grpo_trainer/run_sokoban.sh \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
-  actor_rollout_ref.actor.use_invalid_action_penalty=False
+  actor_rollout_ref.actor.use_projection_invalid_penalty=False
 ```
 
 这一轮你要验证的不是分数高低，而是下面 4 个判断：
 
 1. 训练确实没有因为你加 reward 分解而跑挂。
 2. 控制台里能看到你新增的 reward component。
-3. `final_reward` 会随着 `is_action_valid` 和输出格式变化而变化。
+3. `final_reward` 会随着 `is_projection_valid` 和输出格式变化而变化。
 4. 你能明确说出“最终送入 GRPO 的分数到底是什么”。
 
 ---

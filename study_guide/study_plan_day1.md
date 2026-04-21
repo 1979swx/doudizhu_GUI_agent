@@ -242,7 +242,7 @@ bash examples/grpo_trainer/run_alfworld.sh \
 1. `training/global_step`
 2. `episode/reward/mean`
 3. `episode/length/mean`
-4. `episode/valid_action_ratio`
+4. `episode/projection_valid_ratio`
 5. `critic/score/mean`
 6. `critic/advantages/mean`
 7. `timing_s/gen`
@@ -580,7 +580,7 @@ sed -n '300,420p' agent_system/multi_turn_rollout/rollout_loop.py
 
 1. `episode_rewards[active_masks] += rewards`
 2. `episode_lengths[active_masks] += 1`
-3. `is_action_valid` 会被塞进 `non_tensor_batch`
+3. `is_projection_valid` 会被塞进 `non_tensor_batch`
 
 这说明 Day 1 里你可以先把环境交互粗略理解为：
 
@@ -652,13 +652,13 @@ sed -n '200,230p' verl/trainer/ppo/ray_trainer.py
 
 你要记住：
 
-1. `apply_invalid_action_penalty(...)` 会读 `is_action_valid`
+1. `apply_projection_invalid_penalty(...)` 会读 `is_projection_valid`
 2. 惩罚会直接减到最后那个 reward 位置上
-3. 它还会上报 `episode/valid_action_ratio`
+3. 它还会上报 `episode/projection_valid_ratio`
 
 这一步为什么重要：
 
-1. 它解释了上午日志里的 `episode/valid_action_ratio` 从哪来。
+1. 它解释了上午日志里的 `episode/projection_valid_ratio` 从哪来。
 2. 它说明动作合法性约束不是只存在于环境内部，而是会进一步反馈到训练目标。
 3. 这和你未来 GUI agent 的“点击是否合法”“操作序列是否合法”完全同构。
 
@@ -700,7 +700,7 @@ sed -n '1180,1260p' verl/trainer/ppo/ray_trainer.py
 你按顺序抄下这条链：
 
 1. `token_level_scores = reward_tensor`
-2. `apply_invalid_action_penalty`
+2. `apply_projection_invalid_penalty`
 3. `token_level_rewards`
 4. `compute_advantage`
 5. `update_actor`
@@ -723,7 +723,7 @@ sed -n '1180,1260p' verl/trainer/ppo/ray_trainer.py
 | --- | --- | --- |
 | `episode/reward/mean` | 一批轨迹的平均整局回报 | `verl/trainer/ppo/metric_utils.py` 的 `compute_data_metrics`，数据源来自 `episode_rewards` |
 | `episode/length/mean` | 一批轨迹平均跑了多少步 | `compute_data_metrics`，数据源来自 `episode_lengths` |
-| `episode/valid_action_ratio` | 当前 batch 中动作合法的比例 | `ray_trainer.py` 里的 `apply_invalid_action_penalty` |
+| `episode/projection_valid_ratio` | 当前 batch 中动作合法的比例 | `ray_trainer.py` 里的 `apply_projection_invalid_penalty` |
 | `critic/score/mean` | token-level score 按序列求和后的平均值 | `compute_data_metrics`，底层来自 `token_level_scores` |
 | `critic/advantages/mean` | response token 上的 advantage 平均值 | `compute_data_metrics`，底层来自 `compute_advantage` |
 | `response_length/mean` | 平均 response 长度 | `compute_data_metrics` |
@@ -830,7 +830,7 @@ sed -n '1180,1260p' verl/trainer/ppo/ray_trainer.py
 
 例如：
 
-1. `episode/valid_action_ratio` 低：优先怀疑 action projection / 环境合法性判定 / 输出格式。
+1. `episode/projection_valid_ratio` 低：优先怀疑 action projection / 环境合法性判定 / 输出格式。
 2. `episode/reward/mean` 一直不变：优先怀疑环境奖励、group 差异不足、reward 回填。
 3. `timing_s/gen` 特别大：优先怀疑 rollout 生成慢、vllm 配置或 response 太长。
 

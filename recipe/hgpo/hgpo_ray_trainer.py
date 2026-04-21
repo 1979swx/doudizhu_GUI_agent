@@ -200,7 +200,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
     return data, metrics
 
-def apply_invalid_action_penalty(data: DataProto, invalid_action_penalty_coef=float):
+def apply_projection_invalid_penalty(data: DataProto, projection_invalid_penalty_coef=float):
     reward_tensor = data.batch['token_level_scores']
     if 'step_rewards' in data.batch.keys():
         step_rewards = data.batch['step_rewards']
@@ -213,17 +213,17 @@ def apply_invalid_action_penalty(data: DataProto, invalid_action_penalty_coef=fl
 
         valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
 
-        action_valids = data_item.non_tensor_batch['is_action_valid'].astype(np.float32)
-        action_invalids = torch.tensor(1 - action_valids, dtype=torch.float32, device=prompt_ids.device).squeeze(0)
-        # invalid action penalty
+        projection_valids = data_item.non_tensor_batch['is_projection_valid'].astype(np.float32)
+        projection_invalids = torch.tensor(1 - projection_valids, dtype=torch.float32, device=prompt_ids.device).squeeze(0)
+        # projection invalid penalty
         # assert reward_tensor[i, valid_response_length - 1] != 0.0, f'i={i}'
-        reward_tensor[i, valid_response_length - 1] -= invalid_action_penalty_coef * action_invalids
+        reward_tensor[i, valid_response_length - 1] -= projection_invalid_penalty_coef * projection_invalids
 
         if 'step_rewards' in data.batch.keys():
-            step_rewards[i] -= invalid_action_penalty_coef * action_invalids
+            step_rewards[i] -= projection_invalid_penalty_coef * projection_invalids
     
-    valid_action_ratio = np.mean(data.non_tensor_batch['is_action_valid'].astype(np.float32)).item()
-    metrics = {'episode/valid_action_ratio': valid_action_ratio}
+    projection_valid_ratio = np.mean(data.non_tensor_batch['is_projection_valid'].astype(np.float32)).item()
+    metrics = {'episode/projection_valid_ratio': projection_valid_ratio}
     return data, metrics
 
 def compute_response_mask(data: DataProto):
@@ -1178,12 +1178,12 @@ class RayPPOTrainer:
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
-                        # compute rewards. apply_invalid_action_penalty if available
-                        if self.config.actor_rollout_ref.actor.get('use_invalid_action_penalty', True):
-                            batch, invalid_metrics = apply_invalid_action_penalty(batch,
-                                                                                  invalid_action_penalty_coef=self.config.actor_rollout_ref.actor.invalid_action_penalty_coef,
-                                                                                  )
-                            metrics.update(invalid_metrics)
+                        # compute rewards. apply_projection_invalid_penalty if available
+                        if self.config.actor_rollout_ref.actor.get('use_projection_invalid_penalty', True):
+                            batch, projection_invalid_metrics = apply_projection_invalid_penalty(batch,
+                                                                                                 projection_invalid_penalty_coef=self.config.actor_rollout_ref.actor.projection_invalid_penalty_coef,
+                                                                                                 )
+                            metrics.update(projection_invalid_metrics)
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:

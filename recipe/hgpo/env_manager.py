@@ -65,7 +65,7 @@ class SearchEnvironmentManager(EnvironmentManagerBase):
         }
         
         for i, info in enumerate(infos):
-            info["is_action_valid"] = to_numpy(valids[i])
+            info["is_projection_valid"] = to_numpy(valids[i])
 
         rewards = to_numpy(rewards)
         dones = to_numpy(dones)
@@ -143,9 +143,9 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
         if infos[0].get("extra.gamefile") is None:
             infos = set_gamefile(infos, self.gamefile)
 
-        # add action_valid to infos
+        # add projection validity to infos
         for i, info in enumerate(infos):
-            info['is_action_valid'] = to_numpy(valids[i])
+            info['is_projection_valid'] = to_numpy(valids[i])
 
         next_observations = {'text': full_text_obs, 'image': image_obs, 'anchor': text_obs}
         rewards = to_numpy(rewards)
@@ -269,7 +269,7 @@ class SokobanEnvironmentManager(EnvironmentManagerBase):
         next_obs, rewards, dones, infos = self.envs.step(actions)
 
         for i, info in enumerate(infos):
-            info['is_action_valid'] = to_numpy(valids[i])
+            info['is_projection_valid'] = to_numpy(valids[i])
 
         self.memory.store({'text_obs': self.pre_text_obs, 'action': [self.ACTION_LOOKUP[act] for act in actions]})
         if self.is_multi_modal:
@@ -402,9 +402,9 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
             'image': None,
             'anchor': next_obs.copy()
         }
-        # add action_valid to infos
+        # add projection validity to infos
         for i, info in enumerate(infos):
-            info['is_action_valid'] = to_numpy(valids[i])
+            info['is_projection_valid'] = to_numpy(valids[i])
 
         rewards = to_numpy(rewards)
         dones = to_numpy(dones)
@@ -531,9 +531,9 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
 
         full_text_obs = self.build_text_obs(text_obs)
 
-        # add action_valid to infos
+        # add projection validity to infos
         for i, info in enumerate(infos):
-            info['is_action_valid'] = to_numpy(valids[i])
+            info['is_projection_valid'] = to_numpy(valids[i])
 
         next_observations = {'text': full_text_obs, 'image': None, 'anchor': text_obs}
         rewards = to_numpy(rewards)

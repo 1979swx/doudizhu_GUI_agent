@@ -137,7 +137,7 @@ bash examples/grpo_trainer/run_alfworld.sh \
 3. `TrajectoryCollector.multi_turn_loop()` 在训练时会先把 prompt repeat 成 `env.rollout.n` 份，再进入 agent-environment loop。
 4. `uid` 是 GRPO group id，`traj_uid` 是单条轨迹 id。
 5. `EpisodeRewardManager` 默认只在每步 response 的最后一个 token 上打分，但分数来自整条 episode。
-6. `apply_invalid_action_penalty()` 会根据 `is_action_valid` 对 reward 再减惩罚。
+6. `apply_projection_invalid_penalty()` 会根据 `is_projection_valid` 对 reward 再减惩罚。
 7. `compute_grpo_outcome_advantage()` 是按 `uid` 分组做 GRPO，而不是按样本 index 直接做。
 
 ---
@@ -277,7 +277,7 @@ bash examples/grpo_trainer/run_sokoban.sh \
 
 1. `Webshop` 和 `Sokoban` 都会在 reset 时把同一个初始样本或 seed 重复 `group_n` 次，这是 GRPO 的环境侧基础。
 2. `projection.py` 通常负责从模型原始文本里抽出 `<action>` 段，并给出 `valids`。
-3. `is_action_valid` 不是环境天然给你的，而是 projection 和 env manager 联合构造出来的。
+3. `is_projection_valid` 不是环境天然给你的，而是 projection 和 env manager 联合构造出来的。
 4. `SimpleMemory` 其实非常朴素，本质就是把过去若干步 `(obs, action)` 重新拼成 prompt 文本。
 5. `env_manager.py` 里真正影响 agent 表现的，不只是环境 API，还有 prompt 模板的组织方式。
 
@@ -287,7 +287,7 @@ bash examples/grpo_trainer/run_sokoban.sh \
 
 1. 故意让模型输出缺少 `<think>` 或 `<action>`。
 2. 观察 `projection.py` 如何把它判成 invalid。
-3. 观察 `episode/valid_action_ratio` 和 reward 的变化。
+3. 观察 `episode/projection_valid_ratio` 和 reward 的变化。
 
 可选做法：
 
@@ -363,7 +363,7 @@ bash examples/grpo_trainer/run_sokoban.sh \
 
 1. `TrajectoryCollector.gather_rollout_data()` 会把每个 active step 都保留下来，并把整条 episode 的统计量塞回每个 step。
 2. `EpisodeRewardManager` 默认把 `episode_rewards` 当作 step sample 的 outcome reward。
-3. `apply_invalid_action_penalty()` 会再从 reward 中减去非法动作惩罚。
+3. `apply_projection_invalid_penalty()` 会再从 reward 中减去非法动作惩罚。
 4. `compute_grpo_outcome_advantage()` 是按 `uid` 聚组做 mean/std 归一化。
 5. 这里的 `uid` 是“同一个初始问题下的一组轨迹”，`traj_uid` 是“单条轨迹身份”。
 6. 当前实现里，step 展开后的样本会参与 advantage 统计，这意味着“长轨迹”和“短轨迹”的统计权重不一定相同。
@@ -384,12 +384,12 @@ bash examples/grpo_trainer/run_sokoban.sh \
 
 1. `env.rollout.n=2` 跑一次。
 2. `env.rollout.n=8` 跑一次。
-3. `actor_rollout_ref.actor.invalid_action_penalty_coef=0.0` 跑一次。
-4. `actor_rollout_ref.actor.invalid_action_penalty_coef=0.1` 跑一次。
+3. `actor_rollout_ref.actor.projection_invalid_penalty_coef=0.0` 跑一次。
+4. `actor_rollout_ref.actor.projection_invalid_penalty_coef=0.1` 跑一次。
 
 观察：
 
-1. `episode/valid_action_ratio`
+1. `episode/projection_valid_ratio`
 2. `val/*/test_score`
 3. 训练是否更容易出现 group 内全同 reward
 4. 生成吞吐和 batch 对齐是否有变化

@@ -253,16 +253,16 @@
 你只看下面 5 个位置：
 
 1. [prepare.py 的注释](/home/zhangwj/science/verl-agent/examples/data_preprocess/prepare.py:36)
-2. [rollout_loop.py 中 `uid/traj_uid/is_action_valid` 的注入位置](/home/zhangwj/science/verl-agent/agent_system/multi_turn_rollout/rollout_loop.py:314)
+2. [rollout_loop.py 中 `uid/traj_uid/is_projection_valid` 的注入位置](/home/zhangwj/science/verl-agent/agent_system/multi_turn_rollout/rollout_loop.py:314)
 3. [EpisodeRewardManager.__call__](/home/zhangwj/science/verl-agent/agent_system/reward_manager/episode.py:29)
-4. [apply_invalid_action_penalty](/home/zhangwj/science/verl-agent/verl/trainer/ppo/ray_trainer.py:200)
+4. [apply_projection_invalid_penalty](/home/zhangwj/science/verl-agent/verl/trainer/ppo/ray_trainer.py:200)
 5. [make_envs()](/home/zhangwj/science/verl-agent/agent_system/environments/env_manager.py:602)
 
 你今天必须重新确认 4 个事实：
 
 1. 数据集只是占位，不是今天的监督核心。
 2. `env.rollout.n` 决定 group，和你的自定义环境直接相关。
-3. `is_action_valid` 会被 rollout loop 塞进 `non_tensor_batch`。
+3. `is_projection_valid` 会被 rollout loop 塞进 `non_tensor_batch`。
 4. reward manager 看到的是整条 episode 聚合后的 `episode_rewards`。
 
 如果这 4 件事没重新想清楚，你后面改 reward 和 projection 很容易手抖。
@@ -300,7 +300,7 @@
    输出：环境动作 id + 合法性标记
    风险：四段标签缺失、`<action>` 提取失败、动作名拼写漂移
 2. `reward manager`
-   输入：`response_str`、`episode_rewards`、`is_action_valid`
+   输入：`response_str`、`episode_rewards`、`is_projection_valid`
    输出：最后一个 response token 上的 score
    风险：重复计罚、格式解析与 projection 标准不一致
 
@@ -813,7 +813,7 @@ Day 5 只要做到“语义清楚、结构稳定”。
 
 1. 规则单一
 2. 排错容易
-3. 可以稳定统计 `valid_action_ratio`
+3. 可以稳定统计 `projection_valid_ratio`
 
 ### Step 9：不要把 projection 写得过度宽容
 
@@ -927,7 +927,7 @@ ACTION=click[ready] | CHAT=这回合我先稳一下 | MEMORY=我已经进入 rea
 
 1. 先调用 `dummy_gui_projection(text_actions)`
 2. 再把动作送进环境
-3. 再把每个样本的 `is_action_valid` 塞到 `infos`
+3. 再把每个样本的 `is_projection_valid` 塞到 `infos`
 4. 再把当前回复里的 `action/chat/memory` 打包进 `SimpleMemory`
 5. 再调用 `build_text_obs()` 生成下一轮文本观测
 
@@ -993,7 +993,7 @@ Day 5 不需要为了“代码优雅”再拆一个 prompts 文件。今天先�
 2. 取 `episode_rewards`
 3. 把分数写到最后一个 response token 上
 
-你还要再看一眼 [apply_invalid_action_penalty](/home/zhangwj/science/verl-agent/verl/trainer/ppo/ray_trainer.py:200)。
+你还要再看一眼 [apply_projection_invalid_penalty](/home/zhangwj/science/verl-agent/verl/trainer/ppo/ray_trainer.py:200)。
 
 因为你今天如果自己又写了合法性奖励，同时又保留默认 invalid penalty，就会出现**双重计分**。
 
@@ -1010,7 +1010,7 @@ Day 5 不需要为了“代码优雅”再拆一个 prompts 文件。今天先�
 也就是说，训练命令里要显式加：
 
 ```bash
-actor_rollout_ref.actor.use_invalid_action_penalty=False
+actor_rollout_ref.actor.use_projection_invalid_penalty=False
 ```
 
 这样做的工程意义很大：
@@ -1037,7 +1037,7 @@ final_reward = env_reward + format_reward + legality_reward
    四段标签都在 -> `+0.05`
    否则 -> `0.0`
 3. `legality_reward`
-   `is_action_valid=True` -> `+0.05`
+   `is_projection_valid=True` -> `+0.05`
    否则 -> `-0.05`
 
 为什么今天不要把 `format_reward` 设成很大：
@@ -1059,7 +1059,7 @@ final_reward = env_reward + format_reward + legality_reward
 3. `legality_reward`
 4. `final_reward`
 5. `has_all_tags`
-6. `is_action_valid`
+6. `is_projection_valid`
 
 这是因为 [ray_trainer.py](/home/zhangwj/science/verl-agent/verl/trainer/ppo/ray_trainer.py:1199) 会把 `reward_extra_infos_dict` 打到训练日志里。
 
@@ -1203,7 +1203,7 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.use_kl_loss=True \
   actor_rollout_ref.actor.kl_loss_coef=0.01 \
   actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-  actor_rollout_ref.actor.use_invalid_action_penalty=False \
+  actor_rollout_ref.actor.use_projection_invalid_penalty=False \
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
   actor_rollout_ref.rollout.name=vllm \
@@ -1243,7 +1243,7 @@ python3 -m verl.trainer.main_ppo \
 
 1. 程序有没有在 `make_envs(dummy_gui_agent)` 处成功进入你的环境分支
 2. 有没有报 `obs size` 和 batch 对不上
-3. `episode/valid_action_ratio` 是否不是恒为 0
+3. `episode/projection_valid_ratio` 是否不是恒为 0
 4. 你新增的 `reward_extra_info` 是否真的被打印或记录
 5. 终局成功率是否不是完全随机死水
 6. 训练有没有因为多模态输入或字符串解析而直接挂掉
@@ -1260,7 +1260,7 @@ python3 -m verl.trainer.main_ppo \
 2. `build_dummy_gui_envs()` 的 `reset/step` 返回值长度是否正确
 3. `EnvironmentManager.reset()` 输出的 `text/image/anchor` 三个字段是否齐全
 4. `projection` 是否返回了“动作列表 + valids”
-5. `is_action_valid` 是否被正确放进 `infos`
+5. `is_projection_valid` 是否被正确放进 `infos`
 6. reward manager 里 decode 的 `response_str` 是否真的是你以为的那种格式
 
 这是 Day 5 你最应该养成的定位习惯。
@@ -1281,7 +1281,7 @@ python3 -m verl.trainer.main_ppo \
 2. 先写极小环境本体，单独验证 `reset/step`
 3. 再写并行包装，保证输出 shape 和长度正确
 4. 再写 `projection`，只做结构解析和动作映射
-5. 再写 `EnvironmentManager`，负责观测拼装、memory 注入、`is_action_valid` 写回
+5. 再写 `EnvironmentManager`，负责观测拼装、memory 注入、`is_projection_valid` 写回
 6. 再在 `make_envs()` 里注册
 7. 再在 reward manager 里加规则奖励
 8. 先做 env/projection/reward 三层 smoke test

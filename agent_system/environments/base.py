@@ -87,9 +87,9 @@ class EnvironmentManagerBase:
             'image': next_obs,
             'anchor': None # For GiGPO only. anchor observation without any histories, hint, etc. Implement this if needed
         }
-        # add action_valid to infos
+        # add projection validity to infos
         for i, info in enumerate(infos):
-            info['is_action_valid'] = to_numpy(valids[i])
+            info['is_projection_valid'] = to_numpy(valids[i])
 
         rewards = to_numpy(rewards)
         dones = to_numpy(dones)

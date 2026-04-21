@@ -46,8 +46,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    actor_rollout_ref.actor.use_invalid_action_penalty=True \
-    actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
+    actor_rollout_ref.actor.use_projection_invalid_penalty=True \
+    actor_rollout_ref.actor.projection_invalid_penalty_coef=0.1 \
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding=True \
     critic.model.path=Qwen/Qwen2.5-1.5B-Instruct \

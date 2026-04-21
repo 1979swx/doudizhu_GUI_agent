@@ -52,7 +52,7 @@
 1. `env.rollout.n` 是怎样在 rollout 阶段真正变成 GRPO group 的。
 2. `uid` 和 `traj_uid` 分别是什么，它们为什么都必须存在。
 3. `EpisodeRewardManager` 是怎样把 episode-level reward 写回 token-level tensor 的。
-4. `apply_invalid_action_penalty()` 究竟改了什么，没改什么。
+4. `apply_projection_invalid_penalty()` 究竟改了什么，没改什么。
 5. `compute_grpo_outcome_advantage()` 到底是按“轨迹”统计，还是按“step sample”统计。
 6. `update_actor()` 真正消费的字段有哪些，它已经看不到哪些 rollout 细节了。
 
@@ -140,7 +140,7 @@ mkdir -p study_guide/day3_runs
 
 `TrajectoryCollector.multi_turn_loop`
 -> `EpisodeRewardManager`
--> `apply_invalid_action_penalty`
+-> `apply_projection_invalid_penalty`
 -> `compute_advantage`
 -> `update_actor`
 
@@ -185,7 +185,7 @@ EpisodeRewardManager()
 -> reward_tensor 初始全 0
 -> 每个 step sample 的最后一个 response token 写入 episode_rewards
 -> ray_trainer: batch.batch["token_level_scores"] = reward_tensor
--> apply_invalid_action_penalty()
+-> apply_projection_invalid_penalty()
 -> 如果 use_kl_in_reward=False:
    token_level_rewards = token_level_scores
 ```
@@ -238,8 +238,8 @@ sed -n '1,220p' examples/grpo_trainer/run_alfworld.sh
 1. `algorithm.adv_estimator=grpo`
 2. `actor_rollout_ref.actor.use_kl_loss=True`
 3. `actor_rollout_ref.actor.kl_loss_coef=0.01`
-4. `actor_rollout_ref.actor.use_invalid_action_penalty=True`
-5. `actor_rollout_ref.actor.invalid_action_penalty_coef=0.1`
+4. `actor_rollout_ref.actor.use_projection_invalid_penalty=True`
+5. `actor_rollout_ref.actor.projection_invalid_penalty_coef=0.1`
 6. `algorithm.use_kl_in_reward=False`
 7. `env.rollout.n=$group_size`
 8. `env.max_steps=50`
@@ -511,7 +511,7 @@ sed -n '1180,1260p' verl/trainer/ppo/ray_trainer.py
 今天只看下面这个顺序，不要被别的分支吸走注意力：
 
 1. `batch.batch["token_level_scores"] = reward_tensor`
-2. `apply_invalid_action_penalty(...)`
+2. `apply_projection_invalid_penalty(...)`
 3. `apply_kl_penalty(...)` 或 `batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]`
 4. `compute_advantage(...)`
 5. `update_actor(...)`
@@ -521,7 +521,7 @@ sed -n '1180,1260p' verl/trainer/ppo/ray_trainer.py
 把下面这 5 句写进 `reward_adv_chain.md`：
 
 1. `token_level_scores` 是 reward manager 刚吐出来的“基础分数张量”。
-2. `apply_invalid_action_penalty()` 会直接原地修改 `token_level_scores`。
+2. `apply_projection_invalid_penalty()` 会直接原地修改 `token_level_scores`。
 3. 如果 `algorithm.use_kl_in_reward=False`，那 `token_level_rewards` 就只是修改后的 `token_level_scores`。
 4. `compute_advantage()` 用的是 `token_level_rewards`，不是原始 `episode_rewards`。
 5. `update_actor()` 吃的是 `advantages`，不是 `uid` 或 `episode_rewards` 本身。
@@ -534,8 +534,8 @@ sed -n '1180,1260p' verl/trainer/ppo/ray_trainer.py
 
 当前仓库里：
 
-1. 动作合法性标签 `is_action_valid` 由环境 / projection / env manager 链路产出。
-2. 真正把“非法动作惩罚”减到 reward 上，是在 `ray_trainer.py` 的 `apply_invalid_action_penalty()`。
+1. 动作合法性标签 `is_projection_valid` 由环境 / projection / env manager 链路产出。
+2. 真正把“非法动作惩罚”减到 reward 上，是在 `ray_trainer.py` 的 `apply_projection_invalid_penalty()`。
 
 #### 误解 2：脚本里打开了 KL，所以 advantage 里一定已经包含 KL
 
@@ -582,7 +582,7 @@ KL 主要在 actor loss 阶段影响更新。
 2. `uid` 是 group id，`traj_uid` 是 trajectory id。
 3. rollout 会保留每个 step sample，而不是只保留完整轨迹终点。
 4. `EpisodeRewardManager` 把整条 episode 的 reward 写到每个 step sample 最后一个 response token。
-5. `apply_invalid_action_penalty()` 修改的是 token-level reward tensor。
+5. `apply_projection_invalid_penalty()` 修改的是 token-level reward tensor。
 6. `compute_advantage()` 之后，actor 真正看到的是 `advantages` 而不是原始 episode reward。
 
 如果这 6 句你还说不顺，下午不要急着进 `core_algos.py`。
@@ -870,7 +870,7 @@ if self.config.use_kl_loss:
 4. `episode_rewards`
 5. `EpisodeRewardManager`
 6. `token_level_scores`
-7. `apply_invalid_action_penalty`
+7. `apply_projection_invalid_penalty`
 8. `token_level_rewards`
 9. `compute_grpo_outcome_advantage`
 10. `advantages`
@@ -905,7 +905,7 @@ if self.config.use_kl_loss:
 2. 所有实验都用同一套基础命令，只改一个关键变量。
 3. 所有实验都把输出重定向到 `study_guide/day3_runs/` 里。
 4. 所有实验都至少记录 4 个字段：
-   - `episode/valid_action_ratio`
+   - `episode/projection_valid_ratio`
    - `val/*/test_score`
    - `actor/kl_loss` 或 `actor/ppo_kl`
    - 你对“group 内 reward 是否更容易全同”的主观判断
@@ -955,7 +955,7 @@ bash examples/grpo_trainer/run_alfworld.sh \
 你要观察：
 
 1. `val/*/test_score`
-2. `episode/valid_action_ratio`
+2. `episode/projection_valid_ratio`
 3. 每个 batch 的实际吞吐是否更轻快
 4. group 内是否更容易“信息不足”
 
@@ -1014,7 +1014,7 @@ bash examples/grpo_trainer/run_alfworld.sh \
   env.max_steps=8 \
   env.rollout.n=4 \
   ray_init.num_cpus=64 \
-  actor_rollout_ref.actor.invalid_action_penalty_coef=0.0 \
+  actor_rollout_ref.actor.projection_invalid_penalty_coef=0.0 \
   actor_rollout_ref.actor.ppo_mini_batch_size=16 \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
@@ -1024,7 +1024,7 @@ bash examples/grpo_trainer/run_alfworld.sh \
 
 你要观察：
 
-1. `episode/valid_action_ratio`
+1. `episode/projection_valid_ratio`
 2. reward 是否变得更“宽松”
 3. 非法动作是否不再被 reward 直接拉低
 4. `actor/kl_loss` 是否仍然存在
@@ -1032,7 +1032,7 @@ bash examples/grpo_trainer/run_alfworld.sh \
 你要怎么解释：
 
 1. penalty=0 只影响 reward 支路。
-2. 它不会让 `is_action_valid` 指标本身神奇消失。
+2. 它不会让 `is_projection_valid` 指标本身神奇消失。
 3. 它也不会把 KL loss 关掉。
 
 ### 实验 4：固定 `env.rollout.n=4`，把 invalid penalty 设为 0.1
@@ -1049,7 +1049,7 @@ bash examples/grpo_trainer/run_alfworld.sh \
   env.max_steps=8 \
   env.rollout.n=4 \
   ray_init.num_cpus=64 \
-  actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
+  actor_rollout_ref.actor.projection_invalid_penalty_coef=0.1 \
   actor_rollout_ref.actor.ppo_mini_batch_size=16 \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
@@ -1060,7 +1060,7 @@ bash examples/grpo_trainer/run_alfworld.sh \
 你要观察：
 
 1. 非法动作样本的最终 reward 是否被明显压低
-2. `episode/valid_action_ratio` 的后续变化趋势
+2. `episode/projection_valid_ratio` 的后续变化趋势
 3. `val/*/test_score` 是否有任何明显响应
 
 ### 做完 4 个实验后，统一抽日志
@@ -1068,7 +1068,7 @@ bash examples/grpo_trainer/run_alfworld.sh \
 执行：
 
 ```bash
-rg -n "valid_action_ratio|test_score|kl_loss|ppo_kl" study_guide/day3_runs/*.log
+rg -n "projection_valid_ratio|test_score|kl_loss|ppo_kl" study_guide/day3_runs/*.log
 ```
 
 然后把每个实验用下面的 4 行格式写进 `experiment_compare.md`：
@@ -1146,13 +1146,13 @@ sed -n '1188,1248p' verl/trainer/ppo/ray_trainer.py
 ```python
 raw_scores_before_invalid = batch.batch["token_level_scores"].sum(-1).detach().cpu().numpy().copy()
 
-invalid_mask = 1 - batch.non_tensor_batch["is_action_valid"].astype(np.float32)
-invalid_penalty = self.config.actor_rollout_ref.actor.invalid_action_penalty_coef * invalid_mask
+invalid_mask = 1 - batch.non_tensor_batch["is_projection_valid"].astype(np.float32)
+invalid_penalty = self.config.actor_rollout_ref.actor.projection_invalid_penalty_coef * invalid_mask
 
-if self.config.actor_rollout_ref.actor.get('use_invalid_action_penalty', True):
-    batch, invalid_metrics = apply_invalid_action_penalty(
+if self.config.actor_rollout_ref.actor.get('use_projection_invalid_penalty', True):
+    batch, invalid_metrics = apply_projection_invalid_penalty(
         batch,
-        invalid_action_penalty_coef=self.config.actor_rollout_ref.actor.invalid_action_penalty_coef,
+        projection_invalid_penalty_coef=self.config.actor_rollout_ref.actor.projection_invalid_penalty_coef,
     )
     metrics.update(invalid_metrics)
 
@@ -1177,7 +1177,7 @@ for i in range(debug_show):
         batch.non_tensor_batch["uid"][i],
         batch.non_tensor_batch["traj_uid"][i],
         batch.non_tensor_batch["episode_lengths"][i],
-        batch.non_tensor_batch["is_action_valid"][i],
+        batch.non_tensor_batch["is_projection_valid"][i],
         raw_scores_before_invalid[i],
         invalid_penalty[i],
         final_scores_for_grpo[i],
