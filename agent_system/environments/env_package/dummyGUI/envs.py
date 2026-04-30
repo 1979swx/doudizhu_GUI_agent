@@ -68,9 +68,6 @@ class DummyGUIEnv():
         
         obs = self._get_obs()
         info = self._get_info()
-        # The projection is responsible for judging the format validity, 
-        # while this is responsible for judging the legitimacy of the action in the environment, which 
-        # is included in the environment reward.
         info["is_action_valid"] = is_action_valid
         
         return obs, reward, done, info
@@ -173,3 +170,87 @@ def build_dummy_gui_envs(
         group_n=1,
         resources_per_worker={"num_cpus": 0.1}):
     return DummyGUIMultiProcessEnv(max_steps, env_num, group_n, resources_per_worker)
+
+
+
+
+DUMMY_GUI_TEMPLATE = """
+You are an game playing and companion agent operating in a game GUI environment. Your goal is to navigate through the game through actions and chat with the users.
+
+# Current Step
+Your current observation is shown in the image: <image>
+Your previous memory is: {previous_memory}
+Your actions should be based on the observation in the image.
+
+Now it's your turn to make a move. Click ONE BUTTON for the current step by output "click[button_name]" (if no button, output "noop").
+You should first reason step-by-step about the current situation. This reasoning process MUST be enclosed within <think> </think> tags. 
+Once you've finished your reasoning, you should choose an admissible action for current step and present it within <action> </action> tags.
+Output your understanding of the current situation and your strategic thoughts, and use this as the memory to reference for future turns. You MUST enclose it in <memory> </memory> tags.
+You should chat with the user when playing the game. You MUST enclose your your chat output in <chat> </chat> tags.
+
+# Example Output
+<think>some reasoning process</think><action>click[start_match]</action><memory>some strategy</memory><chat>Let's go and win the game!</chat>
+"""
+
+
+from agent_system.environments.base import EnvironmentManagerBase, to_numpy
+from typing import List, Tuple, Dict, Union, Any
+
+class DummyGUIEnvironmentManager(EnvironmentManagerBase):
+
+    def __init__(self, envs, projection_f, config):
+        super().__init__(envs, projection_f, config)
+        self.memory = None
+
+    def reset(self, kwargs):
+        obs, infos = self.envs.reset()
+        self.memory = [None for _ in range(len(obs))]
+        obs = np.array(obs, obs[0].dtype)
+        observations = {
+            'text': self.build_text_obs(infos, init=True), 
+            'image': obs,   
+            'anchor': obs
+        }
+        
+        return observations, infos
+
+    def step(self, text_actions: List[str]):
+        structured_response, projection_valids = self.projection_f(text_actions)
+        actions = structured_response["action"]
+        next_obs, rewards, dones, infos = self.envs.step(actions)
+
+        for i, info in enumerate(infos):
+            info['is_projection_valid'] = to_numpy(projection_valids[i])
+
+        self.memory = structured_response["memory"]
+        
+        next_obs = np.array(next_obs, next_obs[0].dtype)
+        next_observations = {
+            'text': self.build_text_obs(infos),  
+            'image': next_obs,
+            'anchor': next_obs 
+        }
+
+        rewards = to_numpy(rewards)
+        dones = to_numpy(dones)
+
+        return next_observations, rewards, dones, infos
+
+    def build_text_obs(self, infos, init: bool = False) -> List[str]:
+        """
+        This function builds the text observation for the agent.
+        """
+        postprocess_text_obs = []
+
+        for i in range(len(infos)):
+            if init:
+                obs = DUMMY_GUI_TEMPLATE.format(
+                    previous_memory="this is the initial state, no memory.",
+                )
+            else:
+                obs = DUMMY_GUI_TEMPLATE.format(
+                    previous_memory=self.memory[i],
+                )
+            postprocess_text_obs.append(obs)
+
+        return postprocess_text_obs

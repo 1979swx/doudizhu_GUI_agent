@@ -25,32 +25,69 @@ def extract_tag(text: str, tag: str):
 
 def dummy_gui_projection(actions: List[str]):
     # These fuction judges the format correctness and extract actions
-    valids = [0] * len(actions)
-
+    n = len(actions)
+    action_tag = "action"
+    think_tag = "think"
+    chat_tag = "chat"
+    memory_tag = "memory"
+    action_list = [None] * n
+    think_list = [None] * n
+    chat_list = [None] * n
+    memory_list = [None] * n
+    projection_valids = [1] * n
+    structured_response = {
+        action_tag: action_list,
+        think_tag: think_list,
+        chat_tag: chat_list,
+        memory_tag: memory_list
+    }
     for i in range(len(actions)):
-        original_str = actions[i]  # keep the original string
-        actions[i] = actions[i].lower()
-
-        # Attempt to extract the substring within <action>...</action>
-        action_tag = "action"
-        think_tag = "think"
-        chat_tag = "chat"
-        memory_tag = "memory"
+        # Attempt to extract the action
         try:
             extracted_action = extract_tag(actions[i], action_tag)
             if extracted_action == -1:
-                actions[i] = "some crazy action"
+                action_list[i] = "action extraction failed"
+                projection_valids[i] = 0
             else:
-                actions[i] = extracted_action
-                valids[i] = 1
-
-            if extract_tag(original_str, think_tag) == -1:
-                valids[i] = 0
-            if extract_tag(original_str, chat_tag) == -1:
-                valids[i] = 0
-            if extract_tag(original_str, memory_tag) == -1:
-                valids[i] = 0
+                action_list[i] = extracted_action
         except:
-            actions[i] = "some crazy action"
+            action_list[i] = "action extraction failed"
+            projection_valids[i] = 0
 
-    return actions, valids
+        # Attempt to extract the think
+        try:
+            extracted_think = extract_tag(actions[i], think_tag)
+            if extracted_think == -1:
+                think_list[i] = "think extraction failed"
+                projection_valids[i] = 0
+            else:
+                think_list[i] = extracted_think
+        except:
+            think_list[i] = "think extraction failed"
+            projection_valids[i] = 0
+        
+        # Attempt to extract the chat
+        try:
+            extracted_chat = extract_tag(actions[i], chat_tag)
+            if extracted_chat == -1:
+                chat_list[i] = "chat extraction failed"
+                projection_valids[i] = 0
+            else:
+                chat_list[i] = extracted_chat
+        except:
+            chat_list[i] = "chat extraction failed"
+            projection_valids[i] = 0
+
+        # Attempt to extract the memory
+        try:
+            extracted_memory = extract_tag(actions[i], memory_tag)
+            if extracted_memory == -1:
+                memory_list[i] = "memory extraction failed"
+                projection_valids[i] = 0
+            else:
+                memory_list[i] = extracted_memory
+        except:
+            memory_list[i] = "memory extraction failed"
+            projection_valids[i] = 0
+
+    return structured_response, projection_valids
