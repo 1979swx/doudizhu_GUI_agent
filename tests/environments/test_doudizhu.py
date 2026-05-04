@@ -7,9 +7,10 @@ from agent_system.environments.env_manager import DoudizhuEnvironmentManager
 from agent_system.environments.env_package.doudizhu import build_doudizhu_envs, doudizhu_projection
 from agent_system.environments.env_package.doudizhu.core.base import Card
 from agent_system.environments.env_package.doudizhu.envs import DoudizhuSingleEnv
+from agent_system.environments.env_package.doudizhu.renderer import DoudizhuRenderer
 
 
-VALID_RESPONSE = "<think>plan</think><action>[[55, 870], [795, 896]]</action><chat>Let's press them.</chat><memory>I led with a low card.</memory>"
+VALID_RESPONSE = "<think>plan</think><action>[[55, 870], [424, 758]]</action><chat>Let's press them.</chat><memory>I led with a low card.</memory>"
 
 
 def _env_config(use_ray=False):
@@ -44,7 +45,7 @@ def test_doudizhu_projection_valid_and_invalid_cases():
     )
 
     assert valids == [1, 0, 0, 0]
-    assert actions[0]["clicks"] == [[55.0, 870.0], [795.0, 896.0]]
+    assert actions[0]["clicks"] == [[55.0, 870.0], [424.0, 758.0]]
     assert actions[0]["chat"] == "Let's press them."
     assert actions[1]["clicks"] == []
 
@@ -57,7 +58,7 @@ def test_single_env_executes_gui_clicks_and_fallback():
     assert info["landlord"] == 0
     assert len(info["legal_actions"]) > 0
 
-    _obs, reward, done, info = env.step({"clicks": [[55, 870], [795, 896]], "projection_valid": 1})
+    _obs, reward, done, info = env.step({"clicks": [[55, 870], [424, 758]], "projection_valid": 1})
     assert reward == 0.2
     assert done is False
     assert info["click_valid_ratio"] == 1.0
@@ -65,11 +66,43 @@ def test_single_env_executes_gui_clicks_and_fallback():
     assert info["fallback_used"] is False
 
     env.reset(seed=1)
-    _obs, reward, _done, info = env.step({"clicks": [[930, 896]], "projection_valid": 1})
+    _obs, reward, _done, info = env.step({"clicks": [[577, 758]], "projection_valid": 1})
     assert reward == 0.1
     assert info["click_valid_ratio"] == 1.0
     assert info["rule_action_valid"] == 0.0
     assert info["fallback_used"] is True
+
+
+def test_renderer_buttons_are_centered_above_hand_and_clickable():
+    env = DoudizhuSingleEnv(seed=1, env_config=_env_config())
+    _obs, _info = env.reset()
+    renderer = env.renderer
+    state = env.game.state
+
+    hitboxes = renderer.get_hitboxes(state)
+    play_box = next(hitbox.box for hitbox in hitboxes if hitbox.kind == "play")
+    pass_box = next(hitbox.box for hitbox in hitboxes if hitbox.kind == "pass")
+    card_boxes = [hitbox.box for hitbox in hitboxes if hitbox.kind == "card"]
+
+    assert play_box[1] < min(card_box[1] for card_box in card_boxes)
+    assert pass_box[1] < min(card_box[1] for card_box in card_boxes)
+    assert abs(((play_box[0] + pass_box[2]) / 2) - (renderer.width / 2)) <= 2
+
+    assert renderer.hit_test(state, [], 424, 758).kind == "play"
+    assert renderer.hit_test(state, [], 577, 758).kind == "pass"
+
+
+def test_renderer_current_trick_actions_only_use_current_round():
+    renderer = DoudizhuRenderer()
+
+    completed_trick = [(0, "3"), (1, "pass"), (2, "pass")]
+    assert renderer._current_trick_actions(completed_trick) == {0: "3", 1: "pass", 2: "pass"}
+
+    new_trick = [(0, "3"), (1, "pass"), (2, "pass"), (0, "4")]
+    assert renderer._current_trick_actions(new_trick) == {0: "4"}
+
+    contested_trick = [(0, "3"), (1, "4"), (2, "pass")]
+    assert renderer._current_trick_actions(contested_trick) == {0: "3", 1: "4", 2: "pass"}
 
 
 def test_single_env_terminal_win_reward_and_payoffs():
@@ -82,7 +115,7 @@ def test_single_env_terminal_win_reward_and_payoffs():
     env.game.winner_id = None
     env.game.state = env.game.get_state(0)
 
-    _obs, reward, done, info = env.step({"clicks": [[500, 850], [795, 896]], "projection_valid": 1})
+    _obs, reward, done, info = env.step({"clicks": [[500, 850], [424, 758]], "projection_valid": 1})
 
     assert done is True
     assert reward == 1.2
@@ -115,8 +148,8 @@ def test_vector_env_local_fallback_preserves_group_seed():
 
     obs, rewards, dones, infos = env.step(
         [
-            {"clicks": [[55, 870], [795, 896]], "projection_valid": 1},
-            {"clicks": [[930, 896]], "projection_valid": 1},
+            {"clicks": [[55, 870], [424, 758]], "projection_valid": 1},
+            {"clicks": [[577, 758]], "projection_valid": 1},
         ]
     )
     assert obs.shape == (2, 480, 640, 3)

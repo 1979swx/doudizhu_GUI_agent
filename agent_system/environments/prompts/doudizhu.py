@@ -10,9 +10,9 @@ You are Player 0 and the landlord. Players 1 and 2 are peasant opponents control
 # What To Read From The Image
 The current screen is shown here: <image>
 - Your hand is the row of cards at the bottom.
-- Recent plays are shown in the center.
+- Current trick plays are shown as card graphics: P0 near the lower middle, P1 near the upper-right, and P2 near the upper-left.
 - Opponent card counts are shown near Player 1 and Player 2.
-- PLAY and PASS are buttons near the lower-right area.
+- PLAY and PASS are centered above your bottom hand.
 
 # How To Act
 Use normalized coordinates from 1 to 1000: [1, 1] is top-left and [1000, 1000] is bottom-right.
@@ -43,7 +43,7 @@ You are Player 0, the landlord. Your goal is to empty your hand before the two p
 
 # Screenshot
 Current observation: <image>
-Read the bottom hand, center recent-play panel, bottom-card display, and opponent card counts.
+Read the bottom hand, current trick card areas, bottom-card display, and opponent card counts.
 
 # Strategy Priorities
 1. First satisfy the current trick: if an opponent has led a combination, beat it only with the smallest useful legal response; otherwise pass.
@@ -53,7 +53,7 @@ Read the bottom hand, center recent-play panel, bottom-card display, and opponen
 5. Do not intentionally click blank areas; invalid clicks and fallback moves hurt the reward.
 
 # GUI Action Rules
-Coordinates are normalized integers from 1 to 1000. Select cards by clicking them in the bottom row, then click PLAY near the lower-right. To pass, click PASS at the far lower-right.
+Coordinates are normalized integers from 1 to 1000. Select cards by clicking them in the bottom row, then click PLAY centered above your hand. To pass, click PASS next to PLAY above your hand.
 The action parser accepts only a list of coordinate pairs inside <action>, for example [[140, 850], [210, 850], [800, 900]].
 
 # Previous Memory
@@ -79,8 +79,8 @@ Previous memory: {previous_memory}
 
 # Controls
 - Cards are clickable in your bottom hand.
-- PLAY submits selected cards.
-- PASS skips the turn when passing is legal.
+- PLAY submits selected cards and is centered above your bottom hand.
+- PASS skips the turn when passing is legal and is next to PLAY above your bottom hand.
 - Coordinates use a 1 to 1000 normalized screen: [1, 1] top-left, [1000, 1000] bottom-right.
 
 # Behavior

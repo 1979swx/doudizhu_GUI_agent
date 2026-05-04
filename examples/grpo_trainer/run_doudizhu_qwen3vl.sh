@@ -58,10 +58,10 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl_agent_doudizhu' \
-    trainer.experiment_name='grpo_qwen3_vl_2b' \
+    trainer.experiment_name='grpo_qwen3_vl_4b' \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
+    trainer.save_freq=20 \
     trainer.test_freq=5 \
-    trainer.total_epochs=80 \
+    trainer.total_epochs=60 \
     trainer.val_before_train=True $@

@@ -323,7 +323,7 @@ env:
     max_bot_turns: 256
     bot_policy: rule_v1
     reward:
-      projection_valid: 0.5
+      projection_valid: 1.0
       click_valid: 0.5
       rule_action_valid: 0.5
       win: 10.0
