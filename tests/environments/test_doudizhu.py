@@ -1,0 +1,155 @@
+from functools import partial
+
+import numpy as np
+from omegaconf import OmegaConf
+
+from agent_system.environments.env_manager import DoudizhuEnvironmentManager
+from agent_system.environments.env_package.doudizhu import build_doudizhu_envs, doudizhu_projection
+from agent_system.environments.env_package.doudizhu.core.base import Card
+from agent_system.environments.env_package.doudizhu.envs import DoudizhuSingleEnv
+
+
+VALID_RESPONSE = "<think>plan</think><action>[[55, 870], [795, 896]]</action><chat>Let's press them.</chat><memory>I led with a low card.</memory>"
+
+
+def _env_config(use_ray=False):
+    return {
+        "doudizhu": {
+            "use_ray": use_ray,
+            "image_width": 640,
+            "image_height": 480,
+            "max_clicks": 8,
+            "max_memory_chars": 128,
+            "max_bot_turns": 256,
+            "reward": {
+                "projection_valid": 0.05,
+                "click_valid": 0.05,
+                "rule_action_valid": 0.10,
+                "win": 1.0,
+                "loss": -1.0,
+            },
+        }
+    }
+
+
+def test_doudizhu_projection_valid_and_invalid_cases():
+    actions, valids = doudizhu_projection(
+        [
+            VALID_RESPONSE,
+            "<think>plan</think><action>[[0, 100]]</action><chat>hi</chat><memory>m</memory>",
+            "<think>plan</think><action>not-json</action><chat>hi</chat><memory>m</memory>",
+            "<think>plan</think><action>[[100, 100]]</action><memory>m</memory>",
+        ],
+        max_clicks=8,
+    )
+
+    assert valids == [1, 0, 0, 0]
+    assert actions[0]["clicks"] == [[55.0, 870.0], [795.0, 896.0]]
+    assert actions[0]["chat"] == "Let's press them."
+    assert actions[1]["clicks"] == []
+
+
+def test_single_env_executes_gui_clicks_and_fallback():
+    env = DoudizhuSingleEnv(seed=1, env_config=_env_config())
+    obs, info = env.reset()
+    assert obs.shape == (480, 640, 3)
+    assert obs.dtype == np.uint8
+    assert info["landlord"] == 0
+    assert len(info["legal_actions"]) > 0
+
+    _obs, reward, done, info = env.step({"clicks": [[55, 870], [795, 896]], "projection_valid": 1})
+    assert reward == 0.2
+    assert done is False
+    assert info["click_valid_ratio"] == 1.0
+    assert info["rule_action_valid"] == 1.0
+    assert info["fallback_used"] is False
+
+    env.reset(seed=1)
+    _obs, reward, _done, info = env.step({"clicks": [[930, 896]], "projection_valid": 1})
+    assert reward == 0.1
+    assert info["click_valid_ratio"] == 1.0
+    assert info["rule_action_valid"] == 0.0
+    assert info["fallback_used"] is True
+
+
+def test_single_env_terminal_win_reward_and_payoffs():
+    env = DoudizhuSingleEnv(seed=1, env_config=_env_config())
+    env.reset()
+    env.game.players[0].set_current_hand([Card("S", "3")])
+    env.game.judger.playable_cards[0] = {"3"}
+    env.game.round.current_player = 0
+    env.game.round.greater_player = None
+    env.game.winner_id = None
+    env.game.state = env.game.get_state(0)
+
+    _obs, reward, done, info = env.step({"clicks": [[500, 850], [795, 896]], "projection_valid": 1})
+
+    assert done is True
+    assert reward == 1.2
+    assert info["won"] == 1.0
+    assert info["task_score"] == 1.0
+    assert info["winner_id"] == 0
+    assert info["payoffs"] == [1, 0, 0]
+    assert info["rule_action_valid"] == 1.0
+
+
+def test_single_env_terminal_loss_payoffs_do_not_require_game_get_payoffs():
+    env = DoudizhuSingleEnv(seed=1, env_config=_env_config())
+    env.reset()
+    env.game.winner_id = 1
+
+    assert env._terminal_reward() == -1.0
+    info = env._build_info(reward=-1.0)
+    assert info["won"] == 0.0
+    assert info["task_score"] == 0.0
+    assert info["winner_id"] == 1
+    assert info["payoffs"] == [0, 1, 1]
+
+
+def test_vector_env_local_fallback_preserves_group_seed():
+    env = build_doudizhu_envs(seed=3, env_num=1, group_n=2, is_train=True, env_config=_env_config(use_ray=False))
+    obs, infos = env.reset()
+    assert obs.shape == (2, 480, 640, 3)
+    assert len(infos) == 2
+    assert infos[0]["state_summary"]["hand"] == infos[1]["state_summary"]["hand"]
+
+    obs, rewards, dones, infos = env.step(
+        [
+            {"clicks": [[55, 870], [795, 896]], "projection_valid": 1},
+            {"clicks": [[930, 896]], "projection_valid": 1},
+        ]
+    )
+    assert obs.shape == (2, 480, 640, 3)
+    assert rewards == [0.2, 0.1]
+    assert dones == [False, False]
+    assert [info["fallback_used"] for info in infos] == [False, True]
+    env.close()
+
+
+def test_doudizhu_manager_builds_visual_prompt_and_memory():
+    envs = build_doudizhu_envs(seed=5, env_num=1, group_n=1, is_train=True, env_config=_env_config(use_ray=False))
+    config = OmegaConf.create(
+        {
+            "env": {
+                "doudizhu": {
+                    "max_clicks": 8,
+                    "max_memory_chars": 128,
+                }
+            }
+        }
+    )
+    manager = DoudizhuEnvironmentManager(envs, partial(doudizhu_projection, max_clicks=8), config)
+
+    obs, infos = manager.reset(kwargs=None)
+    assert "<image>" in obs["text"][0]
+    assert obs["image"].shape == (1, 480, 640, 3)
+    assert obs["anchor"].shape == (1,)
+
+    next_obs, rewards, dones, infos = manager.step([VALID_RESPONSE])
+    assert "<image>" in next_obs["text"][0]
+    assert "I led with a low card." in next_obs["text"][0]
+    assert rewards.shape == (1,)
+    assert dones.shape == (1,)
+    assert infos[0]["is_projection_valid"].item() == 1
+    assert infos[0]["chat"] == "Let's press them."
+    manager.close()

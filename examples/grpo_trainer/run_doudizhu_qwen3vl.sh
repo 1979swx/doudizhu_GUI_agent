@@ -1,14 +1,13 @@
 set -x
-ENGINE="vllm"
-# export VLLM_ATTENTION_BACKEND=XFORMERS
+ENGINE=${1:-vllm}
 
-num_cpus_per_env_worker=0.1 # The CPU resource allocated for each environment worker. If you want to use less CPU resources, you can decrease this value.
+# export CUDA_VISIBLE_DEVICES=1
 
+num_cpus_per_env_worker=0.1
 train_data_size=16
 val_data_size=64
 group_size=8
 
-# We only use data preparation to indicate the modality and the data size.
 python3 -m examples.data_preprocess.prepare \
     --mode 'visual' \
     --train_data_size $train_data_size \
@@ -21,7 +20,7 @@ python3 -m verl.trainer.main_ppo \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_data_size \
     data.max_prompt_length=1024 \
-    data.max_response_length=512 \
+    data.max_response_length=1024 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.image_key=images \
@@ -40,7 +39,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.65 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=False \
@@ -49,22 +48,20 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.use_projection_invalid_penalty=True \
-    actor_rollout_ref.actor.projection_invalid_penalty_coef=0.2 \
-    actor_rollout_ref.rollout.disable_log_stats=False \
+    actor_rollout_ref.actor.projection_invalid_penalty_coef=0.1 \
     algorithm.use_kl_in_reward=False \
-    env.env_name=Sokoban \
+    env.env_name=doudizhu \
     env.seed=0 \
-    env.max_steps=15 \
+    env.max_steps=30 \
     env.rollout.n=$group_size \
-    env.sokoban.mode='rgb_array' \
     env.resources_per_worker.num_cpus=$num_cpus_per_env_worker \
     trainer.critic_warmup=0 \
-    trainer.logger=['console'] \
-    trainer.project_name='verl_agent_sokoban' \
-    trainer.experiment_name='grpo_qwen3_vl_2b_instruct_sokoban_smoke_projection_revison' \
+    trainer.logger=['console','wandb'] \
+    trainer.project_name='verl_agent_doudizhu' \
+    trainer.experiment_name='grpo_qwen3_vl_2b' \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
-    trainer.total_epochs=150 \
-    trainer.val_before_train=False $@
+    trainer.total_epochs=80 \
+    trainer.val_before_train=True $@

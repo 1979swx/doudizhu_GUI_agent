@@ -314,3 +314,17 @@ env:
   webshop:
     use_small: True
     human_goals: False
+  doudizhu:
+    use_ray: True
+    image_width: 640
+    image_height: 480
+    max_clicks: 10
+    max_memory_chars: 512
+    max_bot_turns: 256
+    bot_policy: rule_v1
+    reward:
+      projection_valid: 0.5
+      click_valid: 0.5
+      rule_action_valid: 0.5
+      win: 10.0
+      loss: 0.0

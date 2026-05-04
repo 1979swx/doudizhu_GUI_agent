@@ -599,6 +599,69 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
                 postprocess_text_obs.append(obs)
         return postprocess_text_obs
 
+
+class DoudizhuEnvironmentManager(EnvironmentManagerBase):
+    def __init__(self, envs, projection_f, config):
+        self.memories = []
+        super().__init__(envs, projection_f, config)
+
+    def reset(self, kwargs):
+        image_obs, infos = self.envs.reset(kwargs=kwargs)
+        self.memories = ["Initial turn. Read the screenshot, identify your hand, and plan the first landlord play." for _ in range(len(infos))]
+        observations = {
+            "text": self.build_text_obs(infos, init=True),
+            "image": image_obs,
+            "anchor": np.array([info.get("state_summary", {}) for info in infos], dtype=object),
+        }
+        return observations, infos
+
+    def step(self, text_actions: List[str]):
+        structured_actions, valids = self.projection_f(text_actions)
+        for i, action in enumerate(structured_actions):
+            action["projection_valid"] = int(valids[i])
+
+        image_obs, rewards, dones, infos = self.envs.step(structured_actions)
+
+        next_memories = []
+        max_memory_chars = int(getattr(self.config.env.doudizhu, "max_memory_chars", 512))
+        for i, action in enumerate(structured_actions):
+            memory = action.get("memory", "")
+            if isinstance(memory, str) and memory.strip():
+                next_memories.append(memory.strip()[:max_memory_chars])
+            else:
+                next_memories.append(self.memories[i] if i < len(self.memories) else "")
+            infos[i]["is_projection_valid"] = to_numpy(valids[i])
+            infos[i]["chat"] = action.get("chat", infos[i].get("chat", ""))
+            infos[i]["memory"] = next_memories[i]
+
+        self.memories = next_memories
+        next_observations = {
+            "text": self.build_text_obs(infos),
+            "image": image_obs,
+            "anchor": np.array([info.get("state_summary", {}) for info in infos], dtype=object),
+        }
+        return next_observations, to_numpy(rewards), to_numpy(dones), infos
+
+    def build_text_obs(self, infos, init: bool = False) -> List[str]:
+        prompts = []
+        for i in range(len(infos)):
+            previous_memory = "No previous memory." if init or i >= len(self.memories) else self.memories[i]
+            prompts.append(DOUDIZHU_VISUAL_TEMPLATE.format(previous_memory=previous_memory))
+        return prompts
+
+    def _process_batch(self, batch_idx, total_batch_list, total_infos, success):
+        for i in reversed(range(len(total_batch_list[batch_idx]))):
+            batch_item = total_batch_list[batch_idx][i]
+            if batch_item["active_masks"]:
+                info = total_infos[batch_idx][i]
+                won_value = float(info.get("won", 0.0))
+                success["success_rate"].append(won_value)
+                success["doudizhu_click_valid_ratio"].append(float(info.get("click_valid_ratio", 0.0)))
+                success["doudizhu_rule_action_valid_rate"].append(float(info.get("rule_action_valid", 0.0)))
+                success["doudizhu_fallback_rate"].append(float(info.get("fallback_used", False)))
+                return
+
+
 def make_envs(config):
     """
     Create enviroments 
@@ -617,6 +680,30 @@ def make_envs(config):
         projection_f = partial(search_projection)
         envs = SearchEnvironmentManager(_envs, projection_f, config)
         val_envs = SearchEnvironmentManager(_val_envs, projection_f, config)
+        return envs, val_envs
+    elif "doudizhu" in config.env.env_name.lower():
+        from agent_system.environments.env_package.doudizhu import build_doudizhu_envs, doudizhu_projection
+
+        _envs = build_doudizhu_envs(
+            seed=config.env.seed,
+            env_num=config.data.train_batch_size,
+            group_n=group_n,
+            is_train=True,
+            env_config=config.env,
+            resources_per_worker=resources_per_worker,
+        )
+        _val_envs = build_doudizhu_envs(
+            seed=config.env.seed + 1000,
+            env_num=config.data.val_batch_size,
+            group_n=1,
+            is_train=False,
+            env_config=config.env,
+            resources_per_worker=resources_per_worker,
+        )
+
+        projection_f = partial(doudizhu_projection, max_clicks=config.env.doudizhu.max_clicks)
+        envs = DoudizhuEnvironmentManager(_envs, projection_f, config)
+        val_envs = DoudizhuEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
     elif "gym_cards" in config.env.env_name.lower():
         from agent_system.environments.env_package.gym_cards import build_gymcards_envs, gym_projection
