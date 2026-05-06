@@ -4,9 +4,9 @@ ENGINE=${1:-vllm}
 # export CUDA_VISIBLE_DEVICES=1
 
 num_cpus_per_env_worker=0.1
-train_data_size=16
+train_data_size=8
 val_data_size=64
-group_size=8
+group_size=16
 
 python3 -m examples.data_preprocess.prepare \
     --mode 'visual' \
@@ -61,7 +61,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.experiment_name='grpo_qwen3_vl_4b' \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
-    trainer.save_freq=20 \
+    trainer.save_freq=15 \
     trainer.test_freq=5 \
     trainer.total_epochs=60 \
     trainer.val_before_train=True $@

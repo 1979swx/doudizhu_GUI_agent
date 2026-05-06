@@ -73,6 +73,21 @@ def test_single_env_executes_gui_clicks_and_fallback():
     assert info["fallback_used"] is True
 
 
+def test_submitted_click_ignores_trailing_actions_but_counts_them_invalid():
+    env = DoudizhuSingleEnv(seed=1, env_config=_env_config())
+    env.reset()
+
+    candidate_action, click_valid_ratio, selected_indices, submit_kind = env._project_clicks_to_game_action(
+        env.game.state,
+        [[55, 870], [424, 758], [55, 870], [577, 758]],
+    )
+
+    assert candidate_action == "3"
+    assert click_valid_ratio == 0.5
+    assert selected_indices == [0]
+    assert submit_kind == "play"
+
+
 def test_renderer_buttons_are_centered_above_hand_and_clickable():
     env = DoudizhuSingleEnv(seed=1, env_config=_env_config())
     _obs, _info = env.reset()

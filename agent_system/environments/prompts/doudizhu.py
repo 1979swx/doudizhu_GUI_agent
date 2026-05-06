@@ -16,8 +16,8 @@ The current screen is shown here: <image>
 
 # How To Act
 Use normalized coordinates from 1 to 1000: [1, 1] is top-left and [1000, 1000] is bottom-right.
-To play cards: click each intended card in your hand, then click PLAY.
-To pass: click PASS. Only pass when you cannot or should not beat the current play.
+To play cards: click each intended card in your hand, then click the PLAY button.
+To pass: click the PASS button. Only pass when you cannot or should not beat the current play.
 Output one turn only. Do not describe the coordinates outside the <action> tag.
 
 # Previous Memory

@@ -133,7 +133,8 @@ class DoudizhuSingleEnv:
 
         if not isinstance(clicks, Sequence):
             clicks = []
-        for click in list(clicks)[: self.max_clicks]:
+        bounded_clicks = list(clicks)[: self.max_clicks]
+        for click_idx, click in enumerate(bounded_clicks):
             if not isinstance(click, Sequence) or len(click) != 2:
                 hit_scores.append(0.0)
                 continue
@@ -148,6 +149,7 @@ class DoudizhuSingleEnv:
                     selected.add(hitbox.payload)
             elif hitbox.kind in ("play", "pass"):
                 submitted = hitbox.kind
+                hit_scores.extend([0.0] * (len(bounded_clicks) - click_idx - 1))
                 break
 
         click_valid_ratio = float(np.mean(hit_scores)) if hit_scores else 0.0
