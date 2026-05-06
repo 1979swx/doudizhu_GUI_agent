@@ -26,6 +26,7 @@ def _env_config(use_ray=False):
                 "projection_valid": 0.05,
                 "click_valid": 0.05,
                 "rule_action_valid": 0.10,
+                "hand_depletion": 0.01,
                 "win": 1.0,
                 "loss": -1.0,
             },
@@ -59,18 +60,22 @@ def test_single_env_executes_gui_clicks_and_fallback():
     assert len(info["legal_actions"]) > 0
 
     _obs, reward, done, info = env.step({"clicks": [[55, 870], [424, 758]], "projection_valid": 1})
-    assert reward == 0.2
+    assert np.isclose(reward, 0.21)
     assert done is False
     assert info["click_valid_ratio"] == 1.0
     assert info["rule_action_valid"] == 1.0
     assert info["fallback_used"] is False
+    assert info["hand_cards_reduced"] == 1
+    assert np.isclose(info["hand_depletion_reward"], 0.01)
 
     env.reset(seed=1)
     _obs, reward, _done, info = env.step({"clicks": [[577, 758]], "projection_valid": 1})
-    assert reward == 0.1
+    assert np.isclose(reward, 0.1)
     assert info["click_valid_ratio"] == 1.0
     assert info["rule_action_valid"] == 0.0
     assert info["fallback_used"] is True
+    assert info["hand_cards_reduced"] == 1
+    assert info["hand_depletion_reward"] == 0.0
 
 
 def test_submitted_click_ignores_trailing_actions_but_counts_them_invalid():
@@ -133,12 +138,14 @@ def test_single_env_terminal_win_reward_and_payoffs():
     _obs, reward, done, info = env.step({"clicks": [[500, 850], [424, 758]], "projection_valid": 1})
 
     assert done is True
-    assert reward == 1.2
+    assert np.isclose(reward, 1.21)
     assert info["won"] == 1.0
     assert info["task_score"] == 1.0
     assert info["winner_id"] == 0
     assert info["payoffs"] == [1, 0, 0]
     assert info["rule_action_valid"] == 1.0
+    assert info["hand_cards_reduced"] == 1
+    assert np.isclose(info["hand_depletion_reward"], 0.01)
 
 
 def test_single_env_terminal_loss_payoffs_do_not_require_game_get_payoffs():
@@ -168,9 +175,10 @@ def test_vector_env_local_fallback_preserves_group_seed():
         ]
     )
     assert obs.shape == (2, 480, 640, 3)
-    assert rewards == [0.2, 0.1]
+    assert np.allclose(rewards, [0.21, 0.1])
     assert dones == [False, False]
     assert [info["fallback_used"] for info in infos] == [False, True]
+    assert [info["hand_depletion_reward"] for info in infos] == [0.01, 0.0]
     env.close()
 
 

@@ -46,6 +46,7 @@ class DoudizhuSingleEnv:
         self.reward_projection = float(_cfg_get(reward_cfg, "projection_valid", 0.05))
         self.reward_click = float(_cfg_get(reward_cfg, "click_valid", 0.05))
         self.reward_rule_action = float(_cfg_get(reward_cfg, "rule_action_valid", 0.10))
+        self.reward_hand_depletion = float(_cfg_get(reward_cfg, "hand_depletion", 0.01))
         self.reward_win = float(_cfg_get(reward_cfg, "win", 1.0))
         self.reward_loss = float(_cfg_get(reward_cfg, "loss", -1.0))
 
@@ -80,6 +81,7 @@ class DoudizhuSingleEnv:
 
         action = action if isinstance(action, dict) else {}
         raw_state = self.game.state
+        prev_hand_count = int(raw_state.get("num_cards_left", [self._num_cards_left(0)])[0])
         candidate_action, click_valid_ratio, selected_indices, submit_kind = self._project_clicks_to_game_action(raw_state, action.get("clicks", []))
         legal_actions = set(raw_state.get("actions", []))
 
@@ -93,6 +95,8 @@ class DoudizhuSingleEnv:
 
         self.game.step(game_action)
         bot_turns, bot_limit_reached = self._run_bots_until_player_turn()
+        hand_cards_reduced = max(0, prev_hand_count - self._num_cards_left(0))
+        hand_depletion_reward = self.reward_hand_depletion * hand_cards_reduced if not fallback_used else 0.0
         self.done = bool(self.game.is_over() or bot_limit_reached)
         if bot_limit_reached:
             self.last_message = "Bot turn limit reached; episode stopped."
@@ -107,6 +111,7 @@ class DoudizhuSingleEnv:
             self.reward_projection * projection_valid
             + self.reward_click * float(click_valid_ratio)
             + self.reward_rule_action * rule_action_valid
+            + hand_depletion_reward
             + terminal_reward
         )
 
@@ -116,6 +121,8 @@ class DoudizhuSingleEnv:
             rule_action_valid=rule_action_valid,
             fallback_used=fallback_used,
             game_action=game_action,
+            hand_cards_reduced=hand_cards_reduced,
+            hand_depletion_reward=hand_depletion_reward,
             selected_cards="".join(raw_state.get("current_hand", "")[idx] for idx in selected_indices),
             submit_kind=submit_kind,
             bot_turns=bot_turns,
@@ -236,6 +243,8 @@ class DoudizhuSingleEnv:
             "rule_action_valid": 0.0,
             "fallback_used": False,
             "game_action": None,
+            "hand_cards_reduced": 0,
+            "hand_depletion_reward": 0.0,
             "selected_cards": "",
             "submit_kind": None,
             "bot_turns": 0,
@@ -264,6 +273,11 @@ class DoudizhuSingleEnv:
             return "PASS"
         labels = {"T": "10", "B": "BJ", "R": "RJ"}
         return " ".join(labels.get(card, card) for card in action)
+
+    def _num_cards_left(self, player_id: int) -> int:
+        if self.game is None:
+            return 0
+        return len(self.game.players[player_id].current_hand)
 
 
 class DoudizhuWorker:

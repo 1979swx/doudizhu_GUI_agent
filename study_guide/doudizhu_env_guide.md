@@ -67,10 +67,11 @@ Agentic RL 中，特别是在视觉-语言模型 (VLM) 的训练初期，纯粹�
 1.  **格式合规奖励 (`reward_projection`，默认 0.05)**: 只要模型严格遵循了四个 XML 标签格式并输出了合法的坐标数组，即给予此奖励。
 2.  **精准点击奖励 (`reward_click`，默认 0.05)**: 乘以 `click_valid_ratio` (命中有效 UI 元素的点击数 / 总点击数)。鼓励模型不要去点击背景黑边或无效区域。
 3.  **规则合法奖励 (`reward_rule_action`，默认 0.10)**: 当模型组成的点击序列形成了一手合法的斗地主出牌（即未触发 Fallback 机制）时给予该奖励。这促使模型去真正理解斗地主规则。
-4.  **游戏胜负奖励 (Terminal Reward)**: 仅在环境触发 `done=True` 时结算。胜利（赢）获得 `reward_win` (默认 1.0)，失败（输）获得 `reward_loss` (默认 -1.0)。
+4.  **手牌减少奖励 (`reward_hand_depletion`，默认 0.01/张)**: 当模型自己完成合法出牌并减少 Player 0 的手牌时，按减少张数给予小额奖励。若动作触发 Fallback，即使环境代打导致手牌减少，也不会发放该奖励。
+5.  **游戏胜负奖励 (Terminal Reward)**: 仅在环境触发 `done=True` 时结算。胜利（赢）获得 `reward_win` (默认 1.0)，失败（输）获得 `reward_loss` (默认 -1.0)。
 
 总奖励公式大致为：
-$Reward = (R_{proj} \times \mathbb{I}_{valid\_proj}) + (R_{click} \times Ratio_{valid\_click}) + (R_{rule} \times \mathbb{I}_{valid\_rule}) + R_{terminal}$
+$Reward = (R_{proj} \times \mathbb{I}_{valid\_proj}) + (R_{click} \times Ratio_{valid\_click}) + (R_{rule} \times \mathbb{I}_{valid\_rule}) + (R_{hand} \times \Delta N_{cards}) + R_{terminal}$
 
 此外，在训练脚本中（如 GRPO），还会开启 `actor_rollout_ref.actor.use_projection_invalid_penalty=True`，对严重违规进行额外的 Loss 级惩罚。
 

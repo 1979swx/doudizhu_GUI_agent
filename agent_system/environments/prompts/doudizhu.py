@@ -18,13 +18,14 @@ The current screen is shown here: <image>
 Use normalized coordinates from 1 to 1000: [1, 1] is top-left and [1000, 1000] is bottom-right.
 To play cards: click each intended card in your hand, then click the PLAY button.
 To pass: click the PASS button. Only pass when you cannot or should not beat the current play.
-Output one turn only. Do not describe the coordinates outside the <action> tag.
+Output one turn only. It is worth noting that each turn of action must end with clicking the PLAY or PASS button.
 
 # Previous Memory
 {previous_memory}
+If there is a conflict between your memory and the current game screenshot, the game screenshot shall always prevail.
 
 # Required Output Format
-You should first reason step-by-step about the visible cards, missing key cards, and your game strategy etc. Next, formulate your exact action as a JSON-style list of one or more [x, y] pairs (where x and y must be numbers in range [1, 1000]). Then, output your chat message content to human players. Finally, generate a compact note for next turn, including recent important plays, remaining plans, useful chat context, etc.
+You should first think step-by-step about the visible cards, missing key cards, and your game strategy etc. Next, formulate your exact action as a JSON-style list of one or more [x, y] pairs (where x and y must be numbers in range [1, 1000]). Then, output your chat message content to human players. Finally, generate a compact note for next turn, including recent important plays, remaining plans, useful chat context, etc.
 You must enclose these with EXACTLY FOUR XML-style tags: <think>, <action>, <chat>, <memory>. Each tag must be present and non-empty.
 
 Example Output:
