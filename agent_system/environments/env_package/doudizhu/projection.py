@@ -4,7 +4,7 @@ import re
 from typing import Any, Dict, List, Tuple
 
 
-TAG_NAMES = ("think", "action", "chat", "memory")
+TAG_NAMES = ("plan", "action", "chat", "memory")
 
 
 def extract_tag(text: str, tag: str):
@@ -18,7 +18,7 @@ def extract_tag(text: str, tag: str):
 def _empty_action(raw_text: Any = "") -> Dict[str, Any]:
     return {
         "clicks": [],
-        "think": "",
+        "plan": "",
         "chat": "",
         "memory": "",
         "raw_action_text": "",
@@ -71,7 +71,7 @@ def doudizhu_projection(text_actions: List[str], max_clicks: int = 8):
 
         action = {
             "clicks": clicks if action_valid else [],
-            "think": extracted["think"] or "",
+            "plan": extracted["plan"] or "",
             "chat": extracted["chat"] or "",
             "memory": extracted["memory"] or "",
             "raw_action_text": extracted["action"] or "",

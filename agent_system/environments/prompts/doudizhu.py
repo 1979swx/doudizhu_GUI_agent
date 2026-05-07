@@ -25,11 +25,11 @@ Output one turn only. It is worth noting that each turn of action must end with 
 If there is a conflict between your memory and the current game screenshot, the game screenshot shall always prevail.
 
 # Required Output Format
-You should first think step-by-step about the visible cards, missing key cards, and your game strategy etc. Next, formulate your exact action as a JSON-style list of one or more [x, y] pairs (where x and y must be numbers in range [1, 1000]). Then, output your chat message content to human players. Finally, generate a compact note for next turn, including recent important plays, remaining plans, useful chat context, etc.
-You must enclose these with EXACTLY FOUR XML-style tags: <think>, <action>, <chat>, <memory>. Each tag must be present and non-empty.
+You should first plan step-by-step about the visible cards, missing key cards, and your game strategy etc. Next, formulate your exact action as a JSON-style list of one or more [x, y] pairs (where x and y must be numbers in range [1, 1000]). Then, output your chat message content to human players. Finally, generate a compact note for next turn, including recent important plays, remaining plans, useful chat context, etc.
+You must enclose these with EXACTLY FOUR XML-style tags: <plan>, <action>, <chat>, <memory>. Each tag must be present and non-empty.
 
 Example Output:
-<think>Your reasoning process.</think>
+<plan>Your reasoning process.</plan>
 <action>[[x1, y1], [x2, y2], ..., [xN, yN]]</action>
 <chat>One natural chat message to human players.</chat>
 <memory>Compact note for next turn.</memory>
@@ -62,7 +62,7 @@ The action parser accepts only a list of coordinate pairs inside <action>, for e
 
 # Output Contract
 You must output all four tags exactly once:
-<think>Short tactical reasoning based on the screenshot.</think>
+<plan>Short tactical reasoning based on the screenshot.</plan>
 <action>JSON-style coordinate list only.</action>
 <chat>Short companion chat; no long explanation.</chat>
 <memory>Short persistent memory for the next prompt.</memory>
@@ -85,11 +85,11 @@ Previous memory: {previous_memory}
 - Coordinates use a 1 to 1000 normalized screen: [1, 1] top-left, [1000, 1000] bottom-right.
 
 # Behavior
-Play to win, but keep the chat brief and friendly. Think about what the opponents just played, how many cards each opponent has left, and whether you should lead, beat, or pass. Choose clicks that map to real visible UI elements.
+Play to win, but keep the chat brief and friendly. Consider what the opponents just played, how many cards each opponent has left, and whether you should lead, beat, or pass. Choose clicks that map to real visible UI elements.
 
 # Required Response
 Use this exact four-tag structure with no extra text:
-<think>Observe the screen and choose the move.</think>
+<plan>Observe the screen and choose the move.</plan>
 <action>[[x1, y1], [x2, y2]]</action>
 <chat>A short table-talk sentence.</chat>
 <memory>A concise update for next turn.</memory>

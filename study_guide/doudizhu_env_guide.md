@@ -47,7 +47,7 @@ Agent 在每一个回合 (Turn) 都会接收到多模态的观测输入：
 
 ### 4.1 四标签强制格式
 模型必须在其回复中精确包含以下四个 XML 标签，且顺序和内容必须合法（解析逻辑位于 `projection.py` 中的 `doudizhu_projection`）：
-1.  **`<think>`**: 模型的 Chain-of-Thought (CoT) 区域。要求模型在这里分析当前桌面局势、猜测对手手牌并制定出牌策略。
+1.  **`<plan>`**: 模型的计划区域。要求模型在这里分析当前桌面局势、猜测对手手牌并制定出牌策略。
 2.  **`<action>`**: 动作执行区。只能是一个 JSON 风格的二维浮点数/整数数组，代表要点击的屏幕归一化坐标。例如：`[[140, 850], [210, 850]]`。模型需要点击选中的牌，最后加上点击 "PLAY" 或 "PASS" 按钮的坐标。
 3.  **`<chat>`**: 提供拟人化的交互，输出一句简短的桌边聊天。
 4.  **`<memory>`**: 隐式状态传递。模型需要在这里记录对下一轮有用的紧凑信息，如重点牌型的出牌记录。此字段将被裁剪（默认不超过 512 字符）并放入下一回合的 Prompt 中。
@@ -85,12 +85,12 @@ $Reward = (R_{proj} \times \mathbb{I}_{valid\_proj}) + (R_{click} \times Ratio_{
 *   **环境配置**:
     *   `env.env_name=doudizhu`
     *   `env.rollout.n=$group_size` (对于 GRPO，每个 prompt / 初始状态会采集中一定数量的并发 rollout 轨迹以计算基线和 Advantage)。
-    *   `data.max_prompt_length=1024`，`data.max_response_length=1024`：保证有足够长度的上下文去容纳 `<think>` 过程和多步 `<action>` 坐标。
+    *   `data.max_prompt_length=1024`，`data.max_response_length=1024`：保证有足够长度的上下文去容纳 `<plan>` 过程和多步 `<action>` 坐标。
 *   **引擎加速**: `actor_rollout_ref.rollout.name=$ENGINE` (通常为 vLLM) 用于加速大视觉模型的在线生成速度，而 Ray 负责在 CPU 上并行跑多个斗地主环境以消除环境推演的等待。
 
 ### 训练的侧重点建议：
 如果您的目标是改进基于此环境的 Agentic RL：
-1.  **观察 `<think>` 质量**：早期模型可能会输出随机坐标，如果 `<think>` 逻辑正确但 `<action>` 点击错位，说明模型的空间坐标 Grounding 能力薄弱；如果连规则都分析错，则说明需要更多的 SFT 预热。
+1.  **观察 `<plan>` 质量**：早期模型可能会输出随机坐标，如果 `<plan>` 逻辑正确但 `<action>` 点击错位，说明模型的空间坐标 Grounding 能力薄弱；如果连规则都分析错，则说明需要更多的 SFT 预热。
 2.  **调整奖励权重 (Reward Shaping)**：如果在训练中发现模型倾向于“每次都 PASS 来逃避错误点击惩罚”，可能需要提高赢牌的权重 (`reward_win`) 或者适当降低非法点击的局部惩罚，鼓励其探索进攻性动作。
 3.  **Memory 的利用率**：监控多轮次下模型是否真的读取了上一轮自己写入的 `<memory>`，可以通过在评测中注入特定伪造 memory 观察其行为变化来评估 Agent 长程一致性。
 

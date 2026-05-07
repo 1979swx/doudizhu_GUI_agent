@@ -10,7 +10,7 @@ from agent_system.environments.env_package.doudizhu.envs import DoudizhuSingleEn
 from agent_system.environments.env_package.doudizhu.renderer import DoudizhuRenderer
 
 
-VALID_RESPONSE = "<think>plan</think><action>[[55, 870], [424, 758]]</action><chat>Let's press them.</chat><memory>I led with a low card.</memory>"
+VALID_RESPONSE = "<plan>plan</plan><action>[[55, 870], [424, 758]]</action><chat>Let's press them.</chat><memory>I led with a low card.</memory>"
 
 
 def _env_config(use_ray=False):
@@ -38,9 +38,9 @@ def test_doudizhu_projection_valid_and_invalid_cases():
     actions, valids = doudizhu_projection(
         [
             VALID_RESPONSE,
-            "<think>plan</think><action>[[0, 100]]</action><chat>hi</chat><memory>m</memory>",
-            "<think>plan</think><action>not-json</action><chat>hi</chat><memory>m</memory>",
-            "<think>plan</think><action>[[100, 100]]</action><memory>m</memory>",
+            "<plan>plan</plan><action>[[0, 100]]</action><chat>hi</chat><memory>m</memory>",
+            "<plan>plan</plan><action>not-json</action><chat>hi</chat><memory>m</memory>",
+            "<plan>plan</plan><action>[[100, 100]]</action><memory>m</memory>",
         ],
         max_clicks=8,
     )
