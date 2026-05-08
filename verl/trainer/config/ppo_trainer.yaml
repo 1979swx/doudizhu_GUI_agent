@@ -323,9 +323,9 @@ env:
     max_bot_turns: 256
     bot_policy: rule_v1
     reward:
-      projection_valid: 1.0
-      click_valid: 1.0
+      projection_valid: 0.5
+      click_valid: 0.5
       rule_action_valid: 1.0
-      hand_depletion: 1.0
+      hand_depletion: 0.3
       win: 30.0
       loss: 0.0

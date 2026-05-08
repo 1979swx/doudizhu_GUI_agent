@@ -78,6 +78,20 @@ def test_single_env_executes_gui_clicks_and_fallback():
     assert info["hand_depletion_reward"] == 0.0
 
 
+def test_validity_rewards_accumulate_as_trajectory_average():
+    env = DoudizhuSingleEnv(seed=1, env_config=_env_config())
+    env.reset()
+
+    _obs, first_reward, _done, first_info = env.step({"clicks": [[55, 870], [424, 758]], "projection_valid": 1})
+    _obs, second_reward, _done, second_info = env.step({"clicks": [], "projection_valid": 0})
+
+    assert np.isclose(first_info["validity_reward_average"], 0.20)
+    assert np.isclose(first_reward, 0.21)
+    assert np.isclose(second_info["validity_reward_average"], 0.10)
+    assert np.isclose(second_info["validity_reward_delta"], -0.10)
+    assert np.isclose(first_reward + second_reward, 0.11)
+
+
 def test_submitted_click_ignores_trailing_actions_but_counts_them_invalid():
     env = DoudizhuSingleEnv(seed=1, env_config=_env_config())
     env.reset()

@@ -25,7 +25,7 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.image_key=images \
     data.return_raw_chat=True \
-    actor_rollout_ref.model.path=Qwen/Qwen3-VL-4B-Instruct \
+    actor_rollout_ref.model.path=$PWD/checkpoints/verl_agent_doudizhu/grpo_qwen3_vl_4b/global_step_30/actor/hf_merged \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=128 \
@@ -58,11 +58,11 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl_agent_doudizhu' \
-    trainer.experiment_name='grpo_qwen3_vl_4b' \
+    trainer.experiment_name='grpo_qwen3_vl_4b_step_mean_reward' \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
     trainer.save_freq=15 \
     trainer.resume_mode=disable \
     trainer.test_freq=5 \
-    trainer.total_epochs=105 \
+    trainer.total_epochs=90 \
     trainer.val_before_train=True $@
