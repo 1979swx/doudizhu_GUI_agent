@@ -19,14 +19,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 try:
     from agent_system.environments.env_package.doudizhu.envs import DoudizhuSingleEnv
     from agent_system.environments.env_package.doudizhu.projection import doudizhu_projection
-    from agent_system.environments.prompts.doudizhu import DOUDIZHU_VISUAL_TEMPLATE
+    from agent_system.environments.prompts.doudizhu import DOUDIZHU_VISUAL_TEMPLATE, DOUDIZHU_VISUAL_TEMPLATE_ZH
 except ImportError as e:
     print(f"Failed to import DoudizhuSingleEnv: {e}")
     print("Make sure you run this script from the project root or the conda environment is active.")
     sys.exit(1)
 
 DEFAULT_MODEL_PATH = "checkpoints/verl_agent_doudizhu/grpo_qwen3_vl_4b/global_step_40"
-INITIAL_MEMORY = "Initial turn. Read the screenshot, identify your hand, and plan the first landlord play."
+INITIAL_MEMORY_EN = "Initial turn. Read the screenshot, identify your hand, and plan the first landlord play."
+INITIAL_MEMORY_ZH = "初始回合。阅读截图，识别你的手牌，并规划地主首轮出牌。"
 
 
 def parse_args():
@@ -40,16 +41,35 @@ def parse_args():
     parser.add_argument("--temperature", type=float, default=0.4)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--no-auto-merge", action="store_true", help="Do not auto-merge verl FSDP actor checkpoints.")
+    parser.add_argument("--language", default="en", choices=["en", "zh"], help="UI/prompt language for the Dou Dizhu environment.")
+    parser.add_argument("--chinese-mode", action="store_true", help="Shortcut for --language zh.")
     return parser.parse_args()
 
 
 ARGS = parse_args()
+LANGUAGE = "zh" if ARGS.chinese_mode or ARGS.language == "zh" else "en"
+CHINESE_MODE = LANGUAGE == "zh"
+INITIAL_MEMORY = INITIAL_MEMORY_ZH if CHINESE_MODE else INITIAL_MEMORY_EN
+SPECTATOR_PROMPT_TEMPLATE = DOUDIZHU_VISUAL_TEMPLATE_ZH if CHINESE_MODE else DOUDIZHU_VISUAL_TEMPLATE
+
+
+def ui(en: str, zh: str) -> str:
+    return zh if CHINESE_MODE else en
+
 
 # Global state to track human interactions
 current_clicks = []
 current_obs = None
 done = False
-env = DoudizhuSingleEnv(seed=42)
+env = DoudizhuSingleEnv(
+    seed=42,
+    env_config={
+        "doudizhu": {
+            "language": LANGUAGE,
+            "chinese_mode": CHINESE_MODE,
+        }
+    },
+)
 spectator_agent = None
 spectator_agent_key = None
 spectator_memory = INITIAL_MEMORY
@@ -152,7 +172,8 @@ class DoudizhuSpectatorAgent:
         self.torch = torch
 
     def generate_action(self, obs: np.ndarray, memory: str, max_new_tokens: int, temperature: float, top_p: float):
-        prompt = DOUDIZHU_VISUAL_TEMPLATE.format(previous_memory=memory or "No previous memory.")
+        no_memory = "没有上一轮记忆。" if CHINESE_MODE else "No previous memory."
+        prompt = SPECTATOR_PROMPT_TEMPLATE.format(previous_memory=memory or no_memory)
         chat = [{"role": "user", "content": prompt}]
         prompt_text = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
         prompt_text = prompt_text.replace("<image>", "<|vision_start|><|image_pad|><|vision_end|>")
@@ -272,24 +293,30 @@ def reset_env():
     global current_clicks, current_obs, done
     current_clicks = []
     done = False
-    
+
     # Use a random seed for variety
     seed = np.random.randint(0, 100000)
     current_obs, info = env.reset(seed=seed)
-    
-    msg = "🎮 Game started! You are Player 0 (Landlord).\n"
-    msg += "👉 Instruction: Click on the image to select cards (or PASS/PLAY buttons). "
-    msg += "Your clicks will be recorded as normalized coordinates (1-1000). "
-    msg += "When ready, click 'Submit Clicks to Env'."
-    
+
+    msg = ui(
+        "Game started! You are Player 0 (Landlord).\n"
+        "Instruction: Click on the image to select cards (or PASS/PLAY buttons). "
+        "Your clicks will be recorded as normalized coordinates (1-1000). "
+        "When ready, click 'Submit Clicks to Env'.",
+        "游戏开始！你是玩家 0（地主）。\n"
+        "操作说明：点击图像选择手牌，或点击“出牌/不要”按钮。"
+        "点击会记录为 1-1000 的归一化坐标。"
+        "准备好后点击“提交点击到环境”。",
+    )
+
     return current_obs, msg, "[]", ""
 
 def handle_click(evt: gr.SelectData):
     """Translates the Gradio image click into normalized coordinates (1-1000)"""
     global current_clicks, current_obs, done
     if done:
-        return "Game is over. Please click 'Reset Game'.", json.dumps(current_clicks)
-    
+        return ui("Game is over. Please click 'Reset Game'.", "游戏已结束，请点击“重置游戏”。"), json.dumps(current_clicks)
+
     width = current_obs.shape[1]
     height = current_obs.shape[0]
     px, py = evt.index
@@ -304,45 +331,55 @@ def handle_click(evt: gr.SelectData):
     
     current_clicks.append([norm_x, norm_y])
     
-    msg = f"📍 Added click at ({norm_x}, {norm_y}). Total clicks pending: {len(current_clicks)}"
+    msg = ui(
+        f"Added click at ({norm_x}, {norm_y}). Total clicks pending: {len(current_clicks)}",
+        f"已添加点击 ({norm_x}, {norm_y})。待提交点击数：{len(current_clicks)}",
+    )
     return msg, json.dumps(current_clicks)
 
 def step_env(chat, memory):
     """Simulates the RL Agent taking a step with the accumulated clicks"""
     global current_clicks, current_obs, done
     if done:
-        return current_obs, "Game over. Please reset.", json.dumps([]), memory
+        return current_obs, ui("Game over. Please reset.", "游戏已结束，请重置。"), json.dumps([]), memory
     
     # Construct the identical JSON structure an LLM would output
     action = {
         "clicks": current_clicks,
         "projection_valid": 1.0,  # Simulate perfect XML projection valid
         "chat": chat,
-        "memory": memory
+        "memory": memory,
     }
     
     current_obs, reward, done, info = env.step(action)
     
     fallback = info.get("fallback_used", False)
-    msg = f"💰 Reward: {reward:.3f} | 🎯 Valid Clicks Ratio: {info.get('click_valid_ratio', 0.0):.2f}\n"
-    msg += f"🃏 Game Action Parsed: {info.get('game_action')} "
+    msg = ui(
+        f"Reward: {reward:.3f} | Valid Clicks Ratio: {info.get('click_valid_ratio', 0.0):.2f}\n"
+        f"Game Action Parsed: {info.get('game_action')} ",
+        f"奖励：{reward:.3f} | 有效点击比例：{info.get('click_valid_ratio', 0.0):.2f}\n"
+        f"解析出的游戏动作：{info.get('game_action')} ",
+    )
     
     if fallback:
-         msg += "❌ (FALLBACK TRIGGERED! Invalid Move)\n"
+        msg += ui("(FALLBACK TRIGGERED! Invalid Move)\n", "（触发兜底动作！无效出牌）\n")
     else:
-         msg += "✅ (Valid Move!)\n"
+        msg += ui("(Valid Move!)\n", "（有效出牌）\n")
     
     if done:
-        won = bool(info.get('won', 0))
-        msg += f"\n🏁 Game Over! You {'WON 🏆' if won else 'LOST 💀'}"
+        won = bool(info.get("won", 0))
+        msg += ui(
+            f"\nGame Over! You {'WON' if won else 'LOST'}",
+            f"\n游戏结束！你{'赢了' if won else '输了'}",
+        )
         
-    current_clicks = [] # Reset clicks after submission
-    return current_obs, msg, "[]", info.get('memory', memory)
+    current_clicks = []
+    return current_obs, msg, "[]", info.get("memory", memory)
 
 def clear_clicks():
     global current_clicks
     current_clicks = []
-    return "🧹 Clicks cleared.", "[]"
+    return ui("Clicks cleared.", "已清空点击。"), "[]"
 
 
 def reset_spectator(seed_value):
@@ -356,9 +393,11 @@ def reset_spectator(seed_value):
     else:
         seed = int(seed_value)
     current_obs, info = env.reset(seed=seed)
-    status = (
+    status = ui(
         f"Spectator game reset with seed={seed}.\n"
-        "Load the model if needed, then click Agent Step or Auto-play."
+        "Load the model if needed, then click Agent Step or Auto-play.",
+        f"旁观游戏已重置，seed={seed}。\n"
+        "如有需要请先加载模型，然后点击“Agent 单步”或“自动运行”。",
     )
     return current_obs, current_obs, status, "{}", spectator_memory
 
@@ -366,9 +405,12 @@ def reset_spectator(seed_value):
 def load_spectator_model(model_path, auto_merge, device_map, torch_dtype):
     try:
         agent = _load_spectator_agent(model_path, bool(auto_merge), device_map, torch_dtype)
-        return f"Model loaded from:\n{agent.model_dir}"
+        return ui(f"Model loaded from:\n{agent.model_dir}", f"模型已加载：\n{agent.model_dir}")
     except Exception as exc:
-        return f"Model load failed:\n{type(exc).__name__}: {exc}"
+        return ui(
+            f"Model load failed:\n{type(exc).__name__}: {exc}",
+            f"模型加载失败：\n{type(exc).__name__}: {exc}",
+        )
 
 
 def _spectator_step_core(model_path, auto_merge, device_map, torch_dtype, max_new_tokens, temperature, top_p):
@@ -377,7 +419,13 @@ def _spectator_step_core(model_path, auto_merge, device_map, torch_dtype, max_ne
         current_obs, _info = env.reset(seed=int(np.random.randint(0, 100000)))
         done = False
     if done:
-        return current_obs, current_obs, "Game over. Reset spectator game to continue.", "{}", spectator_memory
+        return (
+            current_obs,
+            current_obs,
+            ui("Game over. Reset spectator game to continue.", "游戏已结束。请重置旁观游戏后继续。"),
+            "{}",
+            spectator_memory,
+        )
 
     obs_before = current_obs.copy()
     agent = _load_spectator_agent(model_path, bool(auto_merge), device_map, torch_dtype)
@@ -397,19 +445,29 @@ def _spectator_step_core(model_path, auto_merge, device_map, torch_dtype, max_ne
         spectator_memory = info.get("memory", spectator_memory)
 
     fallback = bool(info.get("fallback_used", False))
-    result = "FALLBACK: invalid game move" if fallback else "Valid game move"
-    status = (
+    result = ui("FALLBACK: invalid game move", "兜底动作：无效出牌") if fallback else ui("Valid game move", "有效出牌")
+    status = ui(
         f"Reward: {reward:.3f} | Projection valid: {action.get('projection_valid', 0)} | "
         f"Click valid ratio: {info.get('click_valid_ratio', 0.0):.2f}\n"
         f"Parsed game action: {info.get('game_action')} | {result}\n"
         f"Submit kind: {info.get('submit_kind')} | Selected cards: {info.get('selected_cards') or '-'}\n\n"
         f"Click positions:\n{_format_clicks(action.get('clicks', []), obs_before)}\n\n"
         f"Chat: {action.get('chat', '')}\n"
-        f"Memory: {spectator_memory}"
+        f"Memory: {spectator_memory}",
+        f"奖励：{reward:.3f} | 标签解析有效：{action.get('projection_valid', 0)} | "
+        f"有效点击比例：{info.get('click_valid_ratio', 0.0):.2f}\n"
+        f"解析出的游戏动作：{info.get('game_action')} | {result}\n"
+        f"提交类型：{info.get('submit_kind')} | 选中的牌：{info.get('selected_cards') or '-'}\n\n"
+        f"点击位置：\n{_format_clicks(action.get('clicks', []), obs_before)}\n\n"
+        f"聊天：{action.get('chat', '')}\n"
+        f"记忆：{spectator_memory}",
     )
     if done:
         won = bool(info.get("won", 0))
-        status += f"\n\nGame over. {'Player 0 won.' if won else 'Player 0 lost.'}"
+        status += ui(
+            f"\n\nGame over. {'Player 0 won.' if won else 'Player 0 lost.'}",
+            f"\n\n游戏结束。玩家 0 {'赢了。' if won else '输了。'}",
+        )
 
     action_json = json.dumps(
         {
@@ -428,7 +486,10 @@ def spectator_step(model_path, auto_merge, device_map, torch_dtype, max_new_toke
     try:
         return _spectator_step_core(model_path, auto_merge, device_map, torch_dtype, max_new_tokens, temperature, top_p)
     except Exception as exc:
-        status = f"Agent step failed:\n{type(exc).__name__}: {exc}"
+        status = ui(
+            f"Agent step failed:\n{type(exc).__name__}: {exc}",
+            f"Agent 单步失败：\n{type(exc).__name__}: {exc}",
+        )
         fallback_obs = current_obs if current_obs is not None else np.zeros((480, 640, 3), dtype=np.uint8)
         return fallback_obs, fallback_obs, status, "{}", spectator_memory
 
@@ -445,25 +506,30 @@ def spectator_auto_play(model_path, auto_merge, device_map, torch_dtype, max_new
             time.sleep(delay)
 
 
-with gr.Blocks(title="Doudizhu Human and Spectator Debugger", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title=ui("Doudizhu Human and Spectator Debugger", "斗地主人工与旁观调试器"), theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 斗地主 (Dou Dizhu) Agentic Environment")
 
-    with gr.Tab("Human play"):
-        gr.Markdown("Click on the game UI to simulate the LLM's coordinate outputs, then submit them to the environment.")
+    with gr.Tab(ui("Human play", "人工游玩")):
+        gr.Markdown(
+            ui(
+                "Click on the game UI to simulate the LLM's coordinate outputs, then submit them to the environment.",
+                "点击游戏界面来模拟 LLM 输出的坐标，然后提交到环境。",
+            )
+        )
         with gr.Row():
             with gr.Column(scale=2):
-                img = gr.Image(interactive=False, label="Environment Observation (Click to select coords)")
+                img = gr.Image(interactive=False, label=ui("Environment Observation (Click to select coords)", "环境观察（点击选择坐标）"))
 
                 with gr.Row():
-                    clear_btn = gr.Button("Clear Clicks")
-                    step_btn = gr.Button("Submit Clicks to Env", variant="primary")
-                    reset_btn = gr.Button("Reset Game")
+                    clear_btn = gr.Button(ui("Clear Clicks", "清空点击"))
+                    step_btn = gr.Button(ui("Submit Clicks to Env", "提交点击到环境"), variant="primary")
+                    reset_btn = gr.Button(ui("Reset Game", "重置游戏"))
 
             with gr.Column(scale=1):
-                status_out = gr.Textbox(label="Status / Step Result", lines=6)
-                clicks_out = gr.Textbox(label="Current <action> JSON", interactive=False)
-                chat_in = gr.Textbox(label="<chat> Input (Optional)", placeholder="Say something to the peasants...")
-                memory_in = gr.Textbox(label="<memory> Input/Output", placeholder="Write a note to yourself for the next turn...")
+                status_out = gr.Textbox(label=ui("Status / Step Result", "状态 / 单步结果"), lines=6)
+                clicks_out = gr.Textbox(label=ui("Current <action> JSON", "当前 <action> JSON"), interactive=False)
+                chat_in = gr.Textbox(label="<chat>", placeholder=ui("Say something to the peasants...", "给农民玩家说一句话..."))
+                memory_in = gr.Textbox(label="<memory>", placeholder=ui("Write a note to yourself for the next turn...", "给下一轮写一条记忆..."))
 
         img.select(handle_click, outputs=[status_out, clicks_out])
         clear_btn.click(clear_clicks, outputs=[status_out, clicks_out])
@@ -471,15 +537,20 @@ with gr.Blocks(title="Doudizhu Human and Spectator Debugger", theme=gr.themes.So
         step_btn.click(step_env, inputs=[chat_in, memory_in], outputs=[img, status_out, clicks_out, memory_in])
         demo.load(reset_env, outputs=[img, status_out, clicks_out, memory_in])
 
-    with gr.Tab("Spectator mode"):
-        gr.Markdown("Watch a trained VL agent play. The right image marks the exact normalized click coordinates on the pre-action game screen.")
+    with gr.Tab(ui("Spectator mode", "旁观模式")):
+        gr.Markdown(
+            ui(
+                "Watch a trained VL agent play. The right image marks the exact normalized click coordinates on the pre-action game screen.",
+                "观看训练好的 VL agent 出牌。右侧图像会标出动作执行前屏幕上的归一化点击坐标。",
+            )
+        )
         with gr.Row():
             with gr.Column(scale=2):
-                spectator_img = gr.Image(interactive=False, label="Current Observation After Agent Move")
-                spectator_overlay = gr.Image(interactive=False, label="Last Agent Click Overlay")
+                spectator_img = gr.Image(interactive=False, label=ui("Current Observation After Agent Move", "Agent 动作后的当前观察"))
+                spectator_overlay = gr.Image(interactive=False, label=ui("Last Agent Click Overlay", "上一轮 Agent 点击标注"))
             with gr.Column(scale=1):
-                model_path_in = gr.Textbox(label="Model / Checkpoint Path", value=ARGS.model_path)
-                auto_merge_in = gr.Checkbox(label="Auto-merge verl FSDP checkpoint if needed", value=not ARGS.no_auto_merge)
+                model_path_in = gr.Textbox(label=ui("Model / Checkpoint Path", "模型 / checkpoint 路径"), value=ARGS.model_path)
+                auto_merge_in = gr.Checkbox(label=ui("Auto-merge verl FSDP checkpoint if needed", "需要时自动合并 verl FSDP checkpoint"), value=not ARGS.no_auto_merge)
                 with gr.Row():
                     device_map_in = gr.Textbox(label="device_map", value=ARGS.device_map)
                     dtype_in = gr.Dropdown(["auto", "float16", "bfloat16", "float32"], label="torch_dtype", value=ARGS.torch_dtype)
@@ -487,18 +558,18 @@ with gr.Blocks(title="Doudizhu Human and Spectator Debugger", theme=gr.themes.So
                     max_tokens_in = gr.Number(label="max_new_tokens", value=ARGS.max_new_tokens, precision=0)
                     temp_in = gr.Number(label="temperature", value=ARGS.temperature)
                     top_p_in = gr.Number(label="top_p", value=ARGS.top_p)
-                seed_in = gr.Number(label="Reset Seed (blank = random)", value=None, precision=0)
+                seed_in = gr.Number(label=ui("Reset Seed (blank = random)", "重置 Seed（留空为随机）"), value=None, precision=0)
                 with gr.Row():
-                    load_model_btn = gr.Button("Load Model")
-                    spectator_reset_btn = gr.Button("Reset Spectator Game")
+                    load_model_btn = gr.Button(ui("Load Model", "加载模型"))
+                    spectator_reset_btn = gr.Button(ui("Reset Spectator Game", "重置旁观游戏"))
                 with gr.Row():
-                    spectator_step_btn = gr.Button("Agent Step", variant="primary")
-                    auto_steps_in = gr.Number(label="Auto steps", value=10, precision=0)
-                    delay_in = gr.Number(label="Delay seconds", value=0.8)
-                auto_play_btn = gr.Button("Auto-play")
-                spectator_status = gr.Textbox(label="Spectator Status", lines=12)
-                spectator_action_json = gr.Textbox(label="Projected Action / Raw Response", lines=12, interactive=False)
-                spectator_memory_out = gr.Textbox(label="Model Memory", lines=3, interactive=False)
+                    spectator_step_btn = gr.Button(ui("Agent Step", "Agent 单步"), variant="primary")
+                    auto_steps_in = gr.Number(label=ui("Auto steps", "自动步数"), value=10, precision=0)
+                    delay_in = gr.Number(label=ui("Delay seconds", "延迟秒数"), value=0.8)
+                auto_play_btn = gr.Button(ui("Auto-play", "自动运行"))
+                spectator_status = gr.Textbox(label=ui("Spectator Status", "旁观状态"), lines=12)
+                spectator_action_json = gr.Textbox(label=ui("Projected Action / Raw Response", "投影动作 / 原始响应"), lines=12, interactive=False)
+                spectator_memory_out = gr.Textbox(label=ui("Model Memory", "模型记忆"), lines=3, interactive=False)
 
         spectator_reset_btn.click(
             reset_spectator,

@@ -603,11 +603,31 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
 class DoudizhuEnvironmentManager(EnvironmentManagerBase):
     def __init__(self, envs, projection_f, config):
         self.memories = []
+        self.chinese_mode = self._is_chinese_mode(config)
+        self.prompt_template = (
+            DOUDIZHU_VISUAL_TEMPLATE_ZH
+            if self.chinese_mode
+            else DOUDIZHU_VISUAL_TEMPLATE
+        )
         super().__init__(envs, projection_f, config)
+
+    def _is_chinese_mode(self, config) -> bool:
+        doudizhu_cfg = getattr(config.env, "doudizhu", None)
+        if doudizhu_cfg is None:
+            return False
+        if bool(getattr(doudizhu_cfg, "chinese_mode", False)):
+            return True
+        language = str(getattr(doudizhu_cfg, "language", "en")).lower()
+        return language in ("zh", "zh-cn", "chinese", "cn")
 
     def reset(self, kwargs):
         image_obs, infos = self.envs.reset(kwargs=kwargs)
-        self.memories = ["Initial turn. Read the screenshot, identify your hand, and plan the first landlord play." for _ in range(len(infos))]
+        initial_memory = (
+            "初始回合。阅读截图，识别你的手牌，并规划地主首轮出牌。"
+            if self.chinese_mode
+            else "Initial turn. Read the screenshot, identify your hand, and plan the first landlord play."
+        )
+        self.memories = [initial_memory for _ in range(len(infos))]
         observations = {
             "text": self.build_text_obs(infos, init=True),
             "image": image_obs,
@@ -645,8 +665,14 @@ class DoudizhuEnvironmentManager(EnvironmentManagerBase):
     def build_text_obs(self, infos, init: bool = False) -> List[str]:
         prompts = []
         for i in range(len(infos)):
-            previous_memory = "No previous memory." if init or i >= len(self.memories) else self.memories[i]
-            prompts.append(DOUDIZHU_VISUAL_TEMPLATE.format(previous_memory=previous_memory))
+            has_previous_memory = not init and i < len(self.memories)
+            if has_previous_memory:
+                previous_memory = self.memories[i]
+            elif self.chinese_mode:
+                previous_memory = "没有上一轮记忆。"
+            else:
+                previous_memory = "No previous memory."
+            prompts.append(self.prompt_template.format(previous_memory=previous_memory))
         return prompts
 
     def _process_batch(self, batch_idx, total_batch_list, total_infos, success):

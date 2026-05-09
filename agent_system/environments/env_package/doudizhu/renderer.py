@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -9,6 +10,35 @@ CARD_LABELS = {
     "T": "10",
     "B": "BJ",
     "R": "RJ",
+}
+CHINESE_LANGUAGE_NAMES = ("zh", "zh-cn", "chinese", "cn")
+BUNDLED_CHINESE_FONT = Path(__file__).resolve().parent / "assets" / "fonts" / "NotoSansCJKsc-Regular.otf"
+
+TEXT = {
+    "en": {
+        "you": "You",
+        "player": "Player",
+        "landlord": "Landlord",
+        "peasant": "Peasant",
+        "bottom_cards": "Bottom cards",
+        "cards": "cards",
+        "play": "PLAY",
+        "pass": "PASS",
+        "instruction": "Click cards, then PLAY above your hand. Click PASS to skip when allowed.",
+        "player_short": "P",
+    },
+    "zh": {
+        "you": "你",
+        "player": "玩家",
+        "landlord": "地主",
+        "peasant": "农民",
+        "bottom_cards": "底牌",
+        "cards": "张牌",
+        "play": "出牌",
+        "pass": "不要",
+        "instruction": "点击手牌，再点击上方“出牌”。允许过牌时点击“不要”。",
+        "player_short": "玩家",
+    },
 }
 
 
@@ -26,11 +56,13 @@ class HitBox:
 class DoudizhuRenderer:
     """Small in-memory renderer for VL training observations."""
 
-    def __init__(self, width: int = 640, height: int = 480):
+    def __init__(self, width: int = 640, height: int = 480, language: str = "en"):
         self.width = int(width)
         self.height = int(height)
-        self.font = self._load_font(12)
-        self.big_font = self._load_font(14)
+        self.language = "zh" if str(language).lower() in CHINESE_LANGUAGE_NAMES else "en"
+        self.text = TEXT[self.language]
+        self.font = self._load_font(12, prefer_bundled=self.language == "zh")
+        self.big_font = self._load_font(14, prefer_bundled=self.language == "zh")
 
     def norm_to_pixel(self, x: float, y: float) -> Tuple[int, int]:
         px = int(round(float(x) / 1000.0 * (self.width - 1)))
@@ -65,14 +97,30 @@ class DoudizhuRenderer:
         draw = ImageDraw.Draw(image)
 
         draw.rectangle((0, 0, self.width, 72), fill=(25, 78, 96))
-        role = "Landlord" if state.get("self") == state.get("landlord") else "Peasant"
+        role = self.text["landlord"] if state.get("self") == state.get("landlord") else self.text["peasant"]
         counts = state.get("num_cards_left", [0, 0, 0])
         seen = self._pretty_cards(state.get("seen_cards", ""))
-        draw.text((14, 12), f"You: Player {state.get('self', 0)} ({role})", fill=(245, 245, 245), font=self.big_font)
-        draw.text((self.width - 214, 12), f"Bottom cards: {seen or '-'}", fill=(245, 245, 245), font=self.font)
+        draw.text(
+            (14, 12),
+            f"{self.text['you']}: {self.text['player']} {state.get('self', 0)} ({role})",
+            fill=(245, 245, 245),
+            font=self.big_font,
+        )
+        draw.text(
+            (self.width - 214, 12),
+            f"{self.text['bottom_cards']}: {seen or '-'}",
+            fill=(245, 245, 245),
+            font=self.font,
+        )
 
-        p1_box = self._draw_opponent(draw, "P1", self.width - 150, 92, counts[1])
-        p2_box = self._draw_opponent(draw, "P2", 24, 92, counts[2])
+        p1_box = self._draw_opponent(
+            draw,
+            f"{self.text['player_short']}1",
+            self.width - 150,
+            92,
+            counts[1],
+        )
+        p2_box = self._draw_opponent(draw, f"{self.text['player_short']}2", 24, 92, counts[2])
 
         p0_anchor = (self.width // 2, self.height - 112)
         p1_anchor = (p1_box[0] + 53, p1_box[3] + 22)
@@ -82,20 +130,30 @@ class DoudizhuRenderer:
 
         for hitbox in self.get_hitboxes(state, selected_indices):
             if hitbox.kind == "card":
-                self._draw_card(draw, hitbox, state["current_hand"][hitbox.payload], hitbox.payload in set(selected_indices))
+                self._draw_card(
+                    draw,
+                    hitbox,
+                    state["current_hand"][hitbox.payload],
+                    hitbox.payload in set(selected_indices),
+                )
             elif hitbox.kind == "play":
-                self._draw_button(draw, hitbox.box, "PLAY", (220, 78, 56))
+                self._draw_button(draw, hitbox.box, self.text["play"], (220, 78, 56))
             elif hitbox.kind == "pass":
-                self._draw_button(draw, hitbox.box, "PASS", (82, 95, 108))
+                self._draw_button(draw, hitbox.box, self.text["pass"], (82, 95, 108))
 
-        draw.text((14, self.height - 25), "Click cards, then PLAY above your hand. Click PASS to skip when allowed.", fill=(236, 242, 230), font=self.font)
+        draw.text((14, self.height - 25), self.text["instruction"], fill=(236, 242, 230), font=self.font)
         return np.array(image, dtype=np.uint8)
 
     def _draw_opponent(self, draw: ImageDraw.ImageDraw, label: str, x: int, y: int, count: int):
         box = (x, y, x + 106, y + 76)
         draw.rounded_rectangle(box, radius=6, fill=(229, 233, 218), outline=(28, 75, 58), width=2)
         draw.text((x + 12, y + 10), label, fill=(28, 45, 38), font=self.big_font)
-        draw.text((x + 12, y + 34), f"{count} cards", fill=(28, 45, 38), font=self.font)
+        count_text = (
+            f"{count} {self.text['cards']}"
+            if self.language == "en"
+            else f"{count}{self.text['cards']}"
+        )
+        draw.text((x + 12, y + 34), count_text, fill=(28, 45, 38), font=self.font)
         return box
 
     def _draw_card(self, draw: ImageDraw.ImageDraw, hitbox: HitBox, card: str, selected: bool):
@@ -112,15 +170,45 @@ class DoudizhuRenderer:
 
     def _draw_button(self, draw: ImageDraw.ImageDraw, box: Tuple[int, int, int, int], label: str, fill: Tuple[int, int, int]):
         draw.rounded_rectangle(box, radius=5, fill=fill, outline=(255, 255, 255), width=1)
-        draw.text((box[0] + 18, box[1] + 10), label, fill=(255, 255, 255), font=self.big_font)
+        self._draw_centered_text(draw, box, label, fill=(255, 255, 255), font=self.big_font)
 
-    def _load_font(self, size: int):
-        for font_name in ("DejaVuSans.ttf", "Arial.ttf"):
+    def _load_font(self, size: int, prefer_bundled: bool = False):
+        font_names = []
+        if prefer_bundled and BUNDLED_CHINESE_FONT.is_file():
+            font_names.append(str(BUNDLED_CHINESE_FONT))
+        font_names.extend(
+            (
+                "NotoSansCJK-Regular.ttc",
+                "NotoSansCJKsc-Regular.otf",
+                "Noto Sans CJK SC",
+                "WenQuanYi Zen Hei",
+                "SimHei",
+                "Microsoft YaHei",
+                "DejaVuSans.ttf",
+                "Arial.ttf",
+            )
+        )
+        for font_name in font_names:
             try:
                 return ImageFont.truetype(font_name, size=size)
             except OSError:
                 continue
         return ImageFont.load_default()
+
+    def _draw_centered_text(
+        self,
+        draw: ImageDraw.ImageDraw,
+        box: Tuple[int, int, int, int],
+        text: str,
+        fill: Tuple[int, int, int],
+        font,
+    ):
+        text_box = draw.textbbox((0, 0), text, font=font)
+        text_w = text_box[2] - text_box[0]
+        text_h = text_box[3] - text_box[1]
+        x = box[0] + (box[2] - box[0] - text_w) // 2
+        y = box[1] + (box[3] - box[1] - text_h) // 2 - 1
+        draw.text((x, y), text, fill=fill, font=font)
 
     def _hand_layout(self, hand: str):
         card_w = max(24, min(34, (self.width - 28) // max(len(hand), 1) - 3))
@@ -143,9 +231,23 @@ class DoudizhuRenderer:
 
     def _draw_current_trick(self, draw: ImageDraw.ImageDraw, state: Dict):
         plays = self._current_trick_actions(state.get("trace", []))
-        self._draw_play_area(draw, "P2", plays.get(2), 36, 218, align="left")
-        self._draw_play_area(draw, "P1", plays.get(1), self.width - 214, 218, align="left")
-        self._draw_play_area(draw, "P0", plays.get(0), self.width // 2 - 92, 264, align="center")
+        self._draw_play_area(draw, f"{self.text['player_short']}2", plays.get(2), 36, 218, align="left")
+        self._draw_play_area(
+            draw,
+            f"{self.text['player_short']}1",
+            plays.get(1),
+            self.width - 214,
+            218,
+            align="left",
+        )
+        self._draw_play_area(
+            draw,
+            f"{self.text['player_short']}0",
+            plays.get(0),
+            self.width // 2 - 92,
+            264,
+            align="center",
+        )
 
     def _draw_play_area(self, draw: ImageDraw.ImageDraw, label: str, action: Optional[str], x: int, y: int, align: str):
         area_w = 184
@@ -156,7 +258,13 @@ class DoudizhuRenderer:
             draw.text((x + 42, y + 30), "-", fill=(214, 224, 207), font=self.big_font)
         elif action == "pass":
             draw.rounded_rectangle((x + 52, y + 28, x + 132, y + 52), radius=5, fill=(93, 105, 116), outline=(241, 246, 232), width=1)
-            draw.text((x + 76, y + 35), "PASS", fill=(255, 255, 255), font=self.font)
+            self._draw_centered_text(
+                draw,
+                (x + 52, y + 28, x + 132, y + 52),
+                self.text["pass"],
+                fill=(255, 255, 255),
+                font=self.font,
+            )
         else:
             self._draw_card_row(draw, action, x + 32, y + 24, max_width=140)
 
@@ -206,5 +314,5 @@ class DoudizhuRenderer:
 
     def _pretty_cards(self, cards: str) -> str:
         if cards == "pass":
-            return "PASS"
+            return self.text["pass"]
         return " ".join(CARD_LABELS.get(card, card) for card in cards)

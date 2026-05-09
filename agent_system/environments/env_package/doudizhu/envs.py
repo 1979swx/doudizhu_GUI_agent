@@ -28,6 +28,13 @@ def _to_plain_config(config):
     return config
 
 
+def _is_chinese_mode(doudizhu_cfg) -> bool:
+    if bool(_cfg_get(doudizhu_cfg, "chinese_mode", False)):
+        return True
+    language = str(_cfg_get(doudizhu_cfg, "language", "en")).lower()
+    return language in ("zh", "zh-cn", "chinese", "cn")
+
+
 class DoudizhuSingleEnv:
     """Single Dou Dizhu game controlled through in-memory GUI clicks."""
 
@@ -39,9 +46,11 @@ class DoudizhuSingleEnv:
 
         self.max_bot_turns = int(_cfg_get(doudizhu_cfg, "max_bot_turns", 256))
         self.max_clicks = int(_cfg_get(doudizhu_cfg, "max_clicks", 8))
+        self.language = "zh" if _is_chinese_mode(doudizhu_cfg) else "en"
         self.renderer = DoudizhuRenderer(
             width=int(_cfg_get(doudizhu_cfg, "image_width", 640)),
             height=int(_cfg_get(doudizhu_cfg, "image_height", 480)),
+            language=self.language,
         )
         self.reward_projection = float(_cfg_get(reward_cfg, "projection_valid", 0.05))
         self.reward_click = float(_cfg_get(reward_cfg, "click_valid", 0.05))
@@ -101,11 +110,23 @@ class DoudizhuSingleEnv:
         hand_depletion_reward = self.reward_hand_depletion * hand_cards_reduced if not fallback_used else 0.0
         self.done = bool(self.game.is_over() or bot_limit_reached)
         if bot_limit_reached:
-            self.last_message = "Bot turn limit reached; episode stopped."
+            self.last_message = (
+                "Bot 回合达到上限，当前 episode 已停止。"
+                if self.language == "zh"
+                else "Bot turn limit reached; episode stopped."
+            )
         elif fallback_used:
-            self.last_message = f"Fallback executed: {self._pretty_action(game_action)}"
+            self.last_message = (
+                f"已执行兜底动作：{self._pretty_action(game_action)}"
+                if self.language == "zh"
+                else f"Fallback executed: {self._pretty_action(game_action)}"
+            )
         else:
-            self.last_message = f"You played: {self._pretty_action(game_action)}"
+            self.last_message = (
+                f"你出了：{self._pretty_action(game_action)}"
+                if self.language == "zh"
+                else f"You played: {self._pretty_action(game_action)}"
+            )
 
         terminal_reward = self._terminal_reward() if self.done else 0.0
         projection_valid = float(action.get("projection_valid", 0))
@@ -309,7 +330,7 @@ class DoudizhuSingleEnv:
         if action is None:
             return "none"
         if action == "pass":
-            return "PASS"
+            return "不要" if self.language == "zh" else "PASS"
         labels = {"T": "10", "B": "BJ", "R": "RJ"}
         return " ".join(labels.get(card, card) for card in action)
 

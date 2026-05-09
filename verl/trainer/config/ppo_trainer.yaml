@@ -316,16 +316,18 @@ env:
     human_goals: False
   doudizhu:
     use_ray: True
+    language: en
+    chinese_mode: False
     image_width: 640
     image_height: 480
-    max_clicks: 10
+    max_clicks: 12
     max_memory_chars: 512
     max_bot_turns: 256
     bot_policy: rule_v1
     reward:
       projection_valid: 0.5
       click_valid: 0.5
-      rule_action_valid: 1.0
-      hand_depletion: 0.3
-      win: 30.0
+      rule_action_valid: 2.0
+      hand_depletion: 0.1
+      win: 20.0
       loss: 0.0

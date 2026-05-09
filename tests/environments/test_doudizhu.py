@@ -13,24 +13,29 @@ from agent_system.environments.env_package.doudizhu.renderer import DoudizhuRend
 VALID_RESPONSE = "<plan>plan</plan><action>[[55, 870], [424, 758]]</action><chat>Let's press them.</chat><memory>I led with a low card.</memory>"
 
 
-def _env_config(use_ray=False):
+def _env_config(use_ray=False, language=None, chinese_mode=None):
+    doudizhu_cfg = {
+        "use_ray": use_ray,
+        "image_width": 640,
+        "image_height": 480,
+        "max_clicks": 8,
+        "max_memory_chars": 128,
+        "max_bot_turns": 256,
+        "reward": {
+            "projection_valid": 0.05,
+            "click_valid": 0.05,
+            "rule_action_valid": 0.10,
+            "hand_depletion": 0.01,
+            "win": 1.0,
+            "loss": -1.0,
+        },
+    }
+    if language is not None:
+        doudizhu_cfg["language"] = language
+    if chinese_mode is not None:
+        doudizhu_cfg["chinese_mode"] = chinese_mode
     return {
-        "doudizhu": {
-            "use_ray": use_ray,
-            "image_width": 640,
-            "image_height": 480,
-            "max_clicks": 8,
-            "max_memory_chars": 128,
-            "max_bot_turns": 256,
-            "reward": {
-                "projection_valid": 0.05,
-                "click_valid": 0.05,
-                "rule_action_valid": 0.10,
-                "hand_depletion": 0.01,
-                "win": 1.0,
-                "loss": -1.0,
-            },
-        }
+        "doudizhu": doudizhu_cfg,
     }
 
 
@@ -222,4 +227,41 @@ def test_doudizhu_manager_builds_visual_prompt_and_memory():
     assert dones.shape == (1,)
     assert infos[0]["is_projection_valid"].item() == 1
     assert infos[0]["chat"] == "Let's press them."
+    manager.close()
+
+
+def test_doudizhu_chinese_mode_uses_chinese_prompt_and_renderer_text_mode():
+    envs = build_doudizhu_envs(
+        seed=5,
+        env_num=1,
+        group_n=1,
+        is_train=True,
+        env_config=_env_config(use_ray=False, language="zh"),
+    )
+    config = OmegaConf.create(
+        {
+            "env": {
+                "doudizhu": {
+                    "language": "zh",
+                    "max_clicks": 8,
+                    "max_memory_chars": 128,
+                }
+            }
+        }
+    )
+    manager = DoudizhuEnvironmentManager(envs, partial(doudizhu_projection, max_clicks=8), config)
+
+    obs, _infos = manager.reset(kwargs=None)
+    assert "你是一个斗地主游戏陪玩 agent" in obs["text"][0]
+    assert "“出牌”和“不要”按钮" in obs["text"][0]
+    assert "<plan>" in obs["text"][0]
+    assert "<action>" in obs["text"][0]
+    assert obs["image"].shape == (1, 480, 640, 3)
+
+    local_env = DoudizhuSingleEnv(seed=1, env_config=_env_config(language="zh"))
+    image_obs, _info = local_env.reset()
+    assert local_env.renderer.language == "zh"
+    assert local_env.renderer.text["play"] == "出牌"
+    assert str(local_env.renderer.font.path).endswith("NotoSansCJKsc-Regular.otf")
+    assert image_obs.shape == (480, 640, 3)
     manager.close()
