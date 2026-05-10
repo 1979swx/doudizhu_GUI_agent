@@ -326,8 +326,8 @@ env:
     bot_policy: rule_v1
     reward:
       projection_valid: 0.5
-      click_valid: 0.5
-      rule_action_valid: 2.0
-      hand_depletion: 0.1
+      click_valid: 0.6
+      rule_action_valid: 1.5
+      hand_depletion: 0.15
       win: 20.0
       loss: 0.0

@@ -129,12 +129,15 @@ class DoudizhuSingleEnv:
             )
 
         terminal_reward = self._terminal_reward() if self.done else 0.0
+        if self.done and self.game.is_over() and self._payoffs()[0] > 0:
+            self.win_reward = self.reward_win
         projection_valid = float(action.get("projection_valid", 0))
         validity_reward_delta, validity_reward_average = self._update_validity_reward_average(
             projection_valid=projection_valid,
             click_valid_ratio=float(click_valid_ratio),
             rule_action_valid=rule_action_valid,
         )
+        self.hand_depletion_reward_sum += hand_depletion_reward
         reward = (
             validity_reward_delta
             + hand_depletion_reward
@@ -166,6 +169,8 @@ class DoudizhuSingleEnv:
         self.projection_valid_sum = 0.0
         self.click_valid_ratio_sum = 0.0
         self.rule_action_valid_sum = 0.0
+        self.hand_depletion_reward_sum = 0.0
+        self.win_reward = 0.0
 
     def _validity_reward_average(self) -> float:
         if self.validity_step_count <= 0:
@@ -190,6 +195,20 @@ class DoudizhuSingleEnv:
         self.rule_action_valid_sum += float(rule_action_valid)
         current_average = self._validity_reward_average()
         return current_average - previous_average, current_average
+
+    def _validity_reward_components(self) -> Dict[str, float]:
+        if self.validity_step_count <= 0:
+            return {
+                "projection_valid_reward": 0.0,
+                "click_valid_reward": 0.0,
+                "rule_action_valid_reward": 0.0,
+            }
+        inv_count = 1.0 / float(self.validity_step_count)
+        return {
+            "projection_valid_reward": self.reward_projection * self.projection_valid_sum * inv_count,
+            "click_valid_reward": self.reward_click * self.click_valid_ratio_sum * inv_count,
+            "rule_action_valid_reward": self.reward_rule_action * self.rule_action_valid_sum * inv_count,
+        }
 
     def _project_clicks_to_game_action(self, state: Dict[str, Any], clicks: Sequence[Sequence[float]]):
         selected = set()
@@ -303,6 +322,8 @@ class DoudizhuSingleEnv:
             "game_action": None,
             "hand_cards_reduced": 0,
             "hand_depletion_reward": 0.0,
+            "hand_depletion_reward_total": self.hand_depletion_reward_sum,
+            "win_reward": self.win_reward,
             "selected_cards": "",
             "submit_kind": None,
             "bot_turns": 0,
@@ -313,6 +334,7 @@ class DoudizhuSingleEnv:
             "chat": "",
             "memory": "",
         }
+        info.update(self._validity_reward_components())
         info.update(overrides)
         return info
 

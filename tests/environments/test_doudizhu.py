@@ -72,6 +72,11 @@ def test_single_env_executes_gui_clicks_and_fallback():
     assert info["fallback_used"] is False
     assert info["hand_cards_reduced"] == 1
     assert np.isclose(info["hand_depletion_reward"], 0.01)
+    assert np.isclose(info["projection_valid_reward"], 0.05)
+    assert np.isclose(info["click_valid_reward"], 0.05)
+    assert np.isclose(info["rule_action_valid_reward"], 0.10)
+    assert np.isclose(info["hand_depletion_reward_total"], 0.01)
+    assert np.isclose(info["win_reward"], 0.0)
 
     env.reset(seed=1)
     _obs, reward, _done, info = env.step({"clicks": [[577, 758]], "projection_valid": 1})
@@ -81,6 +86,10 @@ def test_single_env_executes_gui_clicks_and_fallback():
     assert info["fallback_used"] is True
     assert info["hand_cards_reduced"] == 1
     assert info["hand_depletion_reward"] == 0.0
+    assert np.isclose(info["projection_valid_reward"], 0.05)
+    assert np.isclose(info["click_valid_reward"], 0.05)
+    assert np.isclose(info["rule_action_valid_reward"], 0.0)
+    assert np.isclose(info["hand_depletion_reward_total"], 0.0)
 
 
 def test_validity_rewards_accumulate_as_trajectory_average():
@@ -95,6 +104,9 @@ def test_validity_rewards_accumulate_as_trajectory_average():
     assert np.isclose(second_info["validity_reward_average"], 0.10)
     assert np.isclose(second_info["validity_reward_delta"], -0.10)
     assert np.isclose(first_reward + second_reward, 0.11)
+    assert np.isclose(second_info["projection_valid_reward"], 0.025)
+    assert np.isclose(second_info["click_valid_reward"], 0.025)
+    assert np.isclose(second_info["rule_action_valid_reward"], 0.05)
 
 
 def test_submitted_click_ignores_trailing_actions_but_counts_them_invalid():
@@ -165,6 +177,7 @@ def test_single_env_terminal_win_reward_and_payoffs():
     assert info["rule_action_valid"] == 1.0
     assert info["hand_cards_reduced"] == 1
     assert np.isclose(info["hand_depletion_reward"], 0.01)
+    assert np.isclose(info["win_reward"], 1.0)
 
 
 def test_single_env_terminal_loss_payoffs_do_not_require_game_get_payoffs():
@@ -227,6 +240,15 @@ def test_doudizhu_manager_builds_visual_prompt_and_memory():
     assert dones.shape == (1,)
     assert infos[0]["is_projection_valid"].item() == 1
     assert infos[0]["chat"] == "Let's press them."
+    success = manager.success_evaluator(
+        total_infos=[[infos[0]]],
+        total_batch_list=[[{"active_masks": True}]],
+    )
+    assert np.isclose(success["doudizhu_reward_projection_valid"][0], 0.05)
+    assert np.isclose(success["doudizhu_reward_click_valid"][0], 0.05)
+    assert np.isclose(success["doudizhu_reward_rule_action_valid"][0], 0.10)
+    assert np.isclose(success["doudizhu_reward_hand_depletion"][0], 0.01)
+    assert np.isclose(success["doudizhu_reward_win"][0], 0.0)
     manager.close()
 
 

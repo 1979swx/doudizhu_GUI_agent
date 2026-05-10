@@ -685,6 +685,11 @@ class DoudizhuEnvironmentManager(EnvironmentManagerBase):
                 success["doudizhu_click_valid_ratio"].append(float(info.get("click_valid_ratio", 0.0)))
                 success["doudizhu_rule_action_valid_rate"].append(float(info.get("rule_action_valid", 0.0)))
                 success["doudizhu_fallback_rate"].append(float(info.get("fallback_used", False)))
+                success["doudizhu_reward_projection_valid"].append(float(info.get("projection_valid_reward", 0.0)))
+                success["doudizhu_reward_click_valid"].append(float(info.get("click_valid_reward", 0.0)))
+                success["doudizhu_reward_rule_action_valid"].append(float(info.get("rule_action_valid_reward", 0.0)))
+                success["doudizhu_reward_hand_depletion"].append(float(info.get("hand_depletion_reward_total", 0.0)))
+                success["doudizhu_reward_win"].append(float(info.get("win_reward", 0.0)))
                 return
 
 

@@ -25,6 +25,14 @@ import torch
 from verl import DataProto
 from verl.utils.import_utils import deprecated
 
+DOUDIZHU_REWARD_METRIC_NAMES = {
+    "doudizhu_reward_projection_valid": "episode/reward/projection_valid",
+    "doudizhu_reward_click_valid": "episode/reward/click_valid",
+    "doudizhu_reward_rule_action_valid": "episode/reward/rule_action_valid",
+    "doudizhu_reward_hand_depletion": "episode/reward/hand_depletion",
+    "doudizhu_reward_win": "episode/reward/win",
+}
+
 @deprecated("verl.utils.metric.reduce_metrics")
 def reduce_metrics(metrics: Dict[str, List[Any]]) -> Dict[str, Any]:
     """
@@ -185,6 +193,13 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         # "episode/tool_call_count/min":
         #     batch.non_tensor_batch["tool_callings"][unique_idx].min().item(),
         **({f"episode/{k}": v[0].item() for k, v in batch.non_tensor_batch.items() if "success_rate" in k}),
+        **(
+            {
+                metric_name: batch.non_tensor_batch[key][0].item()
+                for key, metric_name in DOUDIZHU_REWARD_METRIC_NAMES.items()
+                if key in batch.non_tensor_batch
+            }
+        ),
     }
     return metrics
 

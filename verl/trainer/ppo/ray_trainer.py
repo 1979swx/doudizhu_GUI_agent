@@ -46,6 +46,7 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
+    DOUDIZHU_REWARD_METRIC_NAMES,
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
@@ -692,6 +693,7 @@ class RayPPOTrainer:
         tool_calling_list = []
         traj_uid_list = []
         success_rate_dict = {}
+        doudizhu_reward_dict = {}
 
         # Lists to collect samples for the table
         sample_inputs = []
@@ -772,7 +774,7 @@ class RayPPOTrainer:
             data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
             tool_calling_list.append(test_output_gen_batch.non_tensor_batch['tool_callings'])
             traj_uid_list.append(test_output_gen_batch.non_tensor_batch['traj_uid'])
-            # success rate
+            # success rate and Dou Dizhu reward components
             for k in test_batch.non_tensor_batch.keys():
                 if 'success_rate' in k:
                     if k not in success_rate_dict:
@@ -781,6 +783,12 @@ class RayPPOTrainer:
                     # all success_rate should be the same
                     for i in range(1, len(test_batch.non_tensor_batch[k])):
                         assert test_batch.non_tensor_batch[k][0] == test_batch.non_tensor_batch[k][i], f'not all success_rate are the same, 0: {test_batch.non_tensor_batch[k][0]}, {i}: {test_batch.non_tensor_batch[k][i]}'
+                if k in DOUDIZHU_REWARD_METRIC_NAMES:
+                    if k not in doudizhu_reward_dict:
+                        doudizhu_reward_dict[k] = []
+                    doudizhu_reward_dict[k].append(test_batch.non_tensor_batch[k][0])
+                    for i in range(1, len(test_batch.non_tensor_batch[k])):
+                        assert test_batch.non_tensor_batch[k][0] == test_batch.non_tensor_batch[k][i], f'not all {k} are the same, 0: {test_batch.non_tensor_batch[k][0]}, {i}: {test_batch.non_tensor_batch[k][i]}'
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
@@ -789,6 +797,7 @@ class RayPPOTrainer:
         tool_callings = np.concatenate(tool_calling_list, axis=0)
         traj_uids = np.concatenate(traj_uid_list, axis=0)
         success_rate = {k: np.mean(v) for k, v in success_rate_dict.items()}
+        doudizhu_rewards = {k: np.mean(v) for k, v in doudizhu_reward_dict.items()}
 
         # evaluate test_score based on data source
         data_source_reward = {}
@@ -822,6 +831,8 @@ class RayPPOTrainer:
 
         for k, v in success_rate.items():
             metric_dict[f'val/{k}'] = v
+        for k, v in doudizhu_rewards.items():
+            metric_dict[f'val/{DOUDIZHU_REWARD_METRIC_NAMES[k]}'] = v
 
         return metric_dict
 
