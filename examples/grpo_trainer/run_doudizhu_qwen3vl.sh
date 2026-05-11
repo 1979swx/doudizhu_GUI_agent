@@ -64,7 +64,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
     trainer.save_freq=15 \
-    trainer.resume_mode=disable \
+    trainer.resume_mode=auto \
     trainer.test_freq=5 \
-    trainer.total_epochs=90 \
+    trainer.total_epochs=60 \
     trainer.val_before_train=True $@

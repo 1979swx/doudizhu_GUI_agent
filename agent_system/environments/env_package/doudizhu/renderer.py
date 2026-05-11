@@ -20,8 +20,7 @@ TEXT = {
         "player": "Player",
         "landlord": "Landlord",
         "peasant": "Peasant",
-        "bottom_cards": "Bottom cards",
-        "cards": "cards",
+        "cards_left": "cards left",
         "play": "PLAY",
         "pass": "PASS",
         "instruction": "Click cards, then PLAY above your hand. Click PASS to skip when allowed.",
@@ -32,8 +31,7 @@ TEXT = {
         "player": "玩家",
         "landlord": "地主",
         "peasant": "农民",
-        "bottom_cards": "底牌",
-        "cards": "张牌",
+        "cards_left": "剩余{count}张牌",
         "play": "出牌",
         "pass": "不要",
         "instruction": "点击手牌，再点击上方“出牌”。允许过牌时点击“不要”。",
@@ -99,18 +97,11 @@ class DoudizhuRenderer:
         draw.rectangle((0, 0, self.width, 72), fill=(25, 78, 96))
         role = self.text["landlord"] if state.get("self") == state.get("landlord") else self.text["peasant"]
         counts = state.get("num_cards_left", [0, 0, 0])
-        seen = self._pretty_cards(state.get("seen_cards", ""))
         draw.text(
             (14, 12),
             f"{self.text['you']}: {self.text['player']} {state.get('self', 0)} ({role})",
             fill=(245, 245, 245),
             font=self.big_font,
-        )
-        draw.text(
-            (self.width - 214, 12),
-            f"{self.text['bottom_cards']}: {seen or '-'}",
-            fill=(245, 245, 245),
-            font=self.font,
         )
 
         p1_box = self._draw_opponent(
@@ -149,9 +140,9 @@ class DoudizhuRenderer:
         draw.rounded_rectangle(box, radius=6, fill=(229, 233, 218), outline=(28, 75, 58), width=2)
         draw.text((x + 12, y + 10), label, fill=(28, 45, 38), font=self.big_font)
         count_text = (
-            f"{count} {self.text['cards']}"
+            f"{count} {self.text['cards_left']}"
             if self.language == "en"
-            else f"{count}{self.text['cards']}"
+            else self.text["cards_left"].format(count=count)
         )
         draw.text((x + 12, y + 34), count_text, fill=(28, 45, 38), font=self.font)
         return box
