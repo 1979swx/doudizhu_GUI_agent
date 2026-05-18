@@ -11,9 +11,19 @@ from agent_system.environments.env_package.doudizhu.renderer import DoudizhuRend
 
 
 VALID_RESPONSE = "<plan>plan</plan><action>[[55, 870], [424, 758]]</action><chat>Let's press them.</chat><memory>I led with a low card.</memory>"
+TOOL_CALL_RESPONSE = (
+    "<plan>plan</plan>"
+    "<action>3</action>"
+    '<tool_call>[{"name":"computer_use","arguments":{"action":"left_click","coordinate":[55,870]}},'
+    '{"name":"computer_use","arguments":{"action":"left_click","coordinate":[424,758]}}]</tool_call>'
+    "<chat>Let's press them.</chat>"
+    "<memory>I led with a low card.</memory>"
+)
 MEMORY_WITH_IMAGE_TOKENS_RESPONSE = (
     "<plan>plan</plan>"
-    "<action>[[55, 870], [424, 758]]</action>"
+    "<action>3</action>"
+    '<tool_call>[{"name":"computer_use","arguments":{"action":"left_click","coordinate":[55,870]}},'
+    '{"name":"computer_use","arguments":{"action":"left_click","coordinate":[424,758]}}]</tool_call>'
     "<chat>Let's press them.</chat>"
     "<memory>I saw <image> and <|vision_start|><|image_pad|><|vision_end|> in the prompt.</memory>"
 )
@@ -49,17 +59,26 @@ def test_doudizhu_projection_valid_and_invalid_cases():
     actions, valids = doudizhu_projection(
         [
             VALID_RESPONSE,
-            "<plan>plan</plan><action>[[0, 100]]</action><chat>hi</chat><memory>m</memory>",
+            TOOL_CALL_RESPONSE,
+            "<plan>plan</plan><action>[[-1, 100]]</action><chat>hi</chat><memory>m</memory>",
             "<plan>plan</plan><action>not-json</action><chat>hi</chat><memory>m</memory>",
             "<plan>plan</plan><action>[[100, 100]]</action><memory>m</memory>",
+            (
+                "<plan>plan</plan><action>3</action>"
+                '<tool_call>{"name":"computer_use","arguments":{"action":"key","coordinate":[55,870]}}</tool_call>'
+                "<chat>hi</chat><memory>m</memory>"
+            ),
         ],
         max_clicks=8,
     )
 
-    assert valids == [1, 0, 0, 0]
+    assert valids == [1, 1, 0, 0, 0, 0]
     assert actions[0]["clicks"] == [[55.0, 870.0], [424.0, 758.0]]
     assert actions[0]["chat"] == "Let's press them."
-    assert actions[1]["clicks"] == []
+    assert actions[1]["clicks"] == [[55.0, 870.0], [424.0, 758.0]]
+    assert actions[1]["semantic_action"] == "3"
+    assert actions[1]["tool_calling"] == 2
+    assert actions[2]["clicks"] == []
 
 
 def test_single_env_executes_gui_clicks_and_fallback():
@@ -239,13 +258,15 @@ def test_doudizhu_manager_builds_visual_prompt_and_memory():
     assert obs["image"].shape == (1, 480, 640, 3)
     assert obs["anchor"].shape == (1,)
 
-    next_obs, rewards, dones, infos = manager.step([VALID_RESPONSE])
+    next_obs, rewards, dones, infos = manager.step([TOOL_CALL_RESPONSE])
     assert "<image>" in next_obs["text"][0]
     assert "I led with a low card." in next_obs["text"][0]
     assert rewards.shape == (1,)
     assert dones.shape == (1,)
     assert infos[0]["is_projection_valid"].item() == 1
     assert infos[0]["chat"] == "Let's press them."
+    assert infos[0]["semantic_action"] == "3"
+    assert infos[0]["tool_calling"] == 2.0
     success = manager.success_evaluator(
         total_infos=[[infos[0]]],
         total_batch_list=[[{"active_masks": True}]],
@@ -308,6 +329,7 @@ def test_doudizhu_chinese_mode_uses_chinese_prompt_and_renderer_text_mode():
     assert "‘出牌’和‘不要’按钮" in obs["text"][0]
     assert "<plan>" in obs["text"][0]
     assert "<action>" in obs["text"][0]
+    assert "<tool_call>" in obs["text"][0]
     assert obs["image"].shape == (1, 480, 640, 3)
 
     local_env = DoudizhuSingleEnv(seed=1, env_config=_env_config(language="zh"))

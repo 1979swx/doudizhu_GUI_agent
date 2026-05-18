@@ -15,22 +15,23 @@ The current screen is shown here: <image>
 - PLAY and PASS are centered above your bottom hand.
 
 # How To Act
-Use normalized coordinates from 1 to 1000: [1, 1] is top-left and [1000, 1000] is bottom-right.
+Use normalized screen coordinates from 0 to 1000: [0, 0] is top-left and [1000, 1000] is bottom-right.
 To play cards: click each intended card in your hand, then click the PLAY button.
 To pass: click the PASS button. Only pass when you cannot or should not beat the current play.
-Output one turn only. It is worth noting that each turn of action must end with clicking the PLAY or PASS button.
+Output one turn only. The tool calls must execute the full turn in order, and the final tool call must click PLAY or PASS.
 
 # Previous Memory
 {previous_memory}
 If there is a conflict between your memory and the current game screenshot, the game screenshot shall always prevail.
 
 # Required Output Format
-You should first plan step-by-step about the visible cards, missing key cards, and your game strategy etc. Next, formulate your exact action as a JSON-style list of one or more [x, y] pairs (where x and y must be numbers in range [1, 1000]). Then, output your chat message content to human players. Finally, generate a compact note for next turn, including recent important plays, remaining plans, useful chat context, etc.
-You must enclose these with EXACTLY FOUR XML-style tags: <plan>, <action>, <chat>, <memory>. Each tag must be present and non-empty.
+You should first plan step-by-step about the visible cards, missing key cards, and your game strategy etc. Next, describe the semantic card action in natural card notation inside <action>, such as "3", "3 3 3", "10 J Q K A", "BJ RJ", or "pass". Then, output GUI clicks as a JSON list of computer_use tool calls inside <tool_call>. Each tool call must be {{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[x,y]}}}} where x and y are normalized screen coordinates in range [0, 1000]. Finally, output your chat message content and a compact note for next turn.
+You must enclose these with EXACTLY FIVE XML-style tags: <plan>, <action>, <tool_call>, <chat>, <memory>. Each tag must be present and non-empty.
 
 Example Output:
 <plan>Your reasoning process.</plan>
-<action>[[x1, y1], [x2, y2], ..., [xN, yN]]</action>
+<action>3 3 3</action>
+<tool_call>[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[140,850]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[210,850]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[280,850]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[500,735]}}}}]</tool_call>
 <chat>One natural chat message to human players.</chat>
 <memory>Compact note for next turn.</memory>
 """
@@ -54,20 +55,21 @@ Read the bottom hand, current trick card areas, bottom-card display, and opponen
 5. Do not intentionally click blank areas; invalid clicks and fallback moves hurt the reward.
 
 # GUI Action Rules
-Coordinates are normalized integers from 1 to 1000. Select cards by clicking them in the bottom row, then click PLAY centered above your hand. To pass, click PASS next to PLAY above your hand.
-The action parser accepts only a list of coordinate pairs inside <action>, for example [[140, 850], [210, 850], [800, 900]].
+Coordinates are normalized integers from 0 to 1000. Select cards by clicking them in the bottom row, then click PLAY centered above your hand. To pass, click PASS next to PLAY above your hand.
+The action tag is only the semantic card action, for example "3 3 3" or "pass". The tool_call tag is a JSON list of computer_use left_click calls, one for each click in execution order.
 
 # Previous Memory
 {previous_memory}
 
 # Output Contract
-You must output all four tags exactly once:
+You must output all five tags exactly once:
 <plan>Short tactical reasoning based on the screenshot.</plan>
-<action>JSON-style coordinate list only.</action>
+<action>Semantic card action only.</action>
+<tool_call>JSON list of computer_use left_click calls only.</tool_call>
 <chat>Short companion chat; no long explanation.</chat>
 <memory>Short persistent memory for the next prompt.</memory>
 
-Never put card names, button names, prose, or code fences inside <action>. Put only [[x, y], ...] with all values in [1, 1000].
+Never put coordinates, prose, or code fences inside <action>. Put only the cards to play or "pass". Never put prose or code fences inside <tool_call>; put only valid JSON with coordinates in [0, 1000].
 """
 
 
@@ -82,19 +84,20 @@ Previous memory: {previous_memory}
 - Cards are clickable in your bottom hand.
 - PLAY submits selected cards and is centered above your bottom hand.
 - PASS skips the turn when passing is legal and is next to PLAY above your bottom hand.
-- Coordinates use a 1 to 1000 normalized screen: [1, 1] top-left, [1000, 1000] bottom-right.
+- Coordinates use a 0 to 1000 normalized screen: [0, 0] top-left, [1000, 1000] bottom-right.
 
 # Behavior
 Play to win, but keep the chat brief and friendly. Consider what the opponents just played, how many cards each opponent has left, and whether you should lead, beat, or pass. Choose clicks that map to real visible UI elements.
 
 # Required Response
-Use this exact four-tag structure with no extra text:
+Use this exact five-tag structure with no extra text:
 <plan>Observe the screen and choose the move.</plan>
-<action>[[x1, y1], [x2, y2]]</action>
+<action>3 3</action>
+<tool_call>[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[220,850]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[500,735]}}}}]</tool_call>
 <chat>A short table-talk sentence.</chat>
 <memory>A concise update for next turn.</memory>
 
-The <action> tag must contain only a non-empty coordinate list. Invalid JSON, missing tags, empty tags, out-of-range coordinates, or blank-area clicks reduce reward.
+The <action> tag must contain only the semantic card action. The <tool_call> tag must contain only a non-empty JSON list of computer_use left_click calls. Invalid JSON, missing tags, empty tags, out-of-range coordinates, or blank-area clicks reduce reward.
 """
 
 
@@ -112,23 +115,26 @@ DOUDIZHU_VISUAL_TEMPLATE_ZH = """
 当前游戏屏幕<image>
 - 底部：你的手牌。上方有‘出牌’和‘不要’按钮。
 - 中央出牌区：显示了此轮的出牌情况，玩家0的出牌在中下，玩家1在右上，玩家2在左上。
+当前轮到你出牌了。
 
 如何行动
-使用 1 到 1000 的归一化坐标进行点击：[1, 1] 代表左上角，[1000, 1000] 代表右下角。一次性依次输出当前回合的全部点击操作。
-出牌：依次点击你想要打出的每一张牌，最后点击‘出牌’按钮。
+使用 0 到 1000 的归一化坐标进行点击：[0, 0] 代表左上角，[1000, 1000] 代表右下角。交互区域包括屏幕下方的全部手牌，以及“出牌”、“不要”两个按钮。
+出牌：依次点击你想要打出的每一张手牌，最后点击‘出牌’按钮。
 不出：点击‘不要’按钮。
 每回合的动作必须以点击‘出牌’或‘不要’按钮之一结束。
+一次性依次输出当前回合的全部点击操作。
 
 上一轮记忆
 {previous_memory}
 若记忆与游戏截图出现矛盾时，一定是记忆由于某种原因错了（例如上一轮点击失败），务必以截图为准。
 
 输出格式
-当前轮到你出牌了，通过游戏截图读取当前牌面信息，并简要分析出牌策略；将你的具体行动表述为 JSON 风格的列表，包含一个或多个 [x, y] 坐标对(x 和 y 必须是1到1000范围内的数字)；输出对其它玩家说的聊天内容；为下回合生成一份简短的自然语言记忆，包括对手可能持有的危险牌型、未来战术规划等。
-使用四个 XML 风格标签包裹这些内容：<plan>, <action>, <chat>, <memory>。每个标签都必须存在且不能为空。不添加任何其它额外 XML 标签。
+使用五个 XML 风格标签 <plan>, <action>, <tool_call>, <chat>, <memory> 来包裹以下内容。
+在 <plan> 中通过游戏截图读取当前牌面信息，并简要分析本轮出牌策略；在 <action> 中用自然牌面文本描述本轮牌局动作，例如“3”、“10 J Q K A”、“BJ RJ”或“不要”；在 <tool_call> 中输出 GUI 点击，格式是 computer_use 工具调用 JSON 列表，每个点击为 {{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[x,y]}}}}，x 和 y 必须是 0 到 1000 范围内的归一化坐标，若要点击N个位置则列表中包含N个工具调用；在 <chat> 中输出对其它玩家说的聊天内容；在 <memory> 中为下回合生成一份简短的自然语言记忆，包括对手可能持有的危险牌型、未来战术规划等。
+每个标签都必须存在且不能为空。不添加任何其它额外 XML 标签。
 
 示例
-<plan>推理过程</plan><action>[[x1, y1], [x2, y2], [x3, y3]]</action><chat>聊天内容</chat><memory>为下一回合准备的简短记忆</memory>
+<plan>推理过程</plan><action>3 3</action><tool_call>[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[55,850]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[100,860]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[430,755]}}}}]</tool_call><chat>聊天内容</chat><memory>为下一回合准备的简短记忆</memory>
 """
 
 

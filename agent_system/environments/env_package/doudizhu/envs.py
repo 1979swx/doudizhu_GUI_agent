@@ -161,6 +161,9 @@ class DoudizhuSingleEnv:
             validity_reward_average=validity_reward_average,
             chat=action.get("chat", ""),
             memory=action.get("memory", ""),
+            semantic_action=action.get("semantic_action", ""),
+            tool_calls=action.get("tool_calls", []),
+            tool_calling=float(action.get("tool_calling", 0)),
         )
         return self._render(), reward, self.done, info
 
@@ -333,6 +336,9 @@ class DoudizhuSingleEnv:
             "validity_reward_average": self._validity_reward_average(),
             "chat": "",
             "memory": "",
+            "semantic_action": "",
+            "tool_calls": [],
+            "tool_calling": 0.0,
         }
         info.update(self._validity_reward_components())
         info.update(overrides)
