@@ -54,10 +54,19 @@ from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoModelForTokenClassification,
-    AutoModelForVision2Seq,
     GenerationConfig,
     PretrainedConfig,
 )
+
+try:
+    from transformers import AutoModelForImageTextToText
+except ImportError:
+    AutoModelForImageTextToText = None
+
+try:
+    from transformers import AutoModelForVision2Seq
+except ImportError:
+    AutoModelForVision2Seq = None
 
 try:
     # for torch 2.5+
@@ -110,7 +119,13 @@ class BaseModelMerger(ABC):
         elif "ForCausalLM" in self.model_config.architectures[0]:
             return AutoModelForCausalLM
         elif "ForConditionalGeneration" in self.model_config.architectures[0]:
-            return AutoModelForVision2Seq
+            if (
+                AutoModelForImageTextToText is not None
+                and type(self.model_config) in AutoModelForImageTextToText._model_mapping.keys()
+            ):
+                return AutoModelForImageTextToText
+            if AutoModelForVision2Seq is not None and type(self.model_config) in AutoModelForVision2Seq._model_mapping.keys():
+                return AutoModelForVision2Seq
 
         raise NotImplementedError(f"Unknown architecture {self.model_config.architectures}")
 

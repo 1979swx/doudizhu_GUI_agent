@@ -601,6 +601,16 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
 
 
 class DoudizhuEnvironmentManager(EnvironmentManagerBase):
+    _MEMORY_MULTIMODAL_TOKENS = (
+        "<image>",
+        "<video>",
+        "<|vision_start|>",
+        "<|vision_end|>",
+        "<|image_pad|>",
+        "<|video_pad|>",
+        "<|placeholder|>",
+    )
+
     def __init__(self, envs, projection_f, config):
         self.memories = []
         self.chinese_mode = self._is_chinese_mode(config)
@@ -619,6 +629,14 @@ class DoudizhuEnvironmentManager(EnvironmentManagerBase):
             return True
         language = str(getattr(doudizhu_cfg, "language", "en")).lower()
         return language in ("zh", "zh-cn", "chinese", "cn")
+
+    @classmethod
+    def _sanitize_memory(cls, memory):
+        if not isinstance(memory, str):
+            return ""
+        for token in cls._MEMORY_MULTIMODAL_TOKENS:
+            memory = memory.replace(token, "")
+        return memory.strip()
 
     def reset(self, kwargs):
         image_obs, infos = self.envs.reset(kwargs=kwargs)
@@ -645,9 +663,9 @@ class DoudizhuEnvironmentManager(EnvironmentManagerBase):
         next_memories = []
         max_memory_chars = int(getattr(self.config.env.doudizhu, "max_memory_chars", 512))
         for i, action in enumerate(structured_actions):
-            memory = action.get("memory", "")
-            if isinstance(memory, str) and memory.strip():
-                next_memories.append(memory.strip()[:max_memory_chars])
+            memory = self._sanitize_memory(action.get("memory", ""))
+            if memory:
+                next_memories.append(memory[:max_memory_chars])
             else:
                 next_memories.append(self.memories[i] if i < len(self.memories) else "")
             infos[i]["is_projection_valid"] = to_numpy(valids[i])

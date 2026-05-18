@@ -11,6 +11,12 @@ from agent_system.environments.env_package.doudizhu.renderer import DoudizhuRend
 
 
 VALID_RESPONSE = "<plan>plan</plan><action>[[55, 870], [424, 758]]</action><chat>Let's press them.</chat><memory>I led with a low card.</memory>"
+MEMORY_WITH_IMAGE_TOKENS_RESPONSE = (
+    "<plan>plan</plan>"
+    "<action>[[55, 870], [424, 758]]</action>"
+    "<chat>Let's press them.</chat>"
+    "<memory>I saw <image> and <|vision_start|><|image_pad|><|vision_end|> in the prompt.</memory>"
+)
 
 
 def _env_config(use_ray=False, language=None, chinese_mode=None):
@@ -252,6 +258,30 @@ def test_doudizhu_manager_builds_visual_prompt_and_memory():
     manager.close()
 
 
+def test_doudizhu_manager_sanitizes_memory_multimodal_tokens():
+    envs = build_doudizhu_envs(seed=5, env_num=1, group_n=1, is_train=True, env_config=_env_config(use_ray=False))
+    config = OmegaConf.create(
+        {
+            "env": {
+                "doudizhu": {
+                    "max_clicks": 8,
+                    "max_memory_chars": 128,
+                }
+            }
+        }
+    )
+    manager = DoudizhuEnvironmentManager(envs, partial(doudizhu_projection, max_clicks=8), config)
+
+    manager.reset(kwargs=None)
+    next_obs, _rewards, _dones, infos = manager.step([MEMORY_WITH_IMAGE_TOKENS_RESPONSE])
+    assert next_obs["text"][0].count("<image>") == 1
+    assert "<|vision_start|>" not in next_obs["text"][0]
+    assert "<|image_pad|>" not in next_obs["text"][0]
+    assert "<|vision_end|>" not in next_obs["text"][0]
+    assert infos[0]["memory"] == "I saw  and  in the prompt."
+    manager.close()
+
+
 def test_doudizhu_chinese_mode_uses_chinese_prompt_and_renderer_text_mode():
     envs = build_doudizhu_envs(
         seed=5,
@@ -274,8 +304,8 @@ def test_doudizhu_chinese_mode_uses_chinese_prompt_and_renderer_text_mode():
     manager = DoudizhuEnvironmentManager(envs, partial(doudizhu_projection, max_clicks=8), config)
 
     obs, _infos = manager.reset(kwargs=None)
-    assert "你是一个斗地主游戏陪玩 agent" in obs["text"][0]
-    assert "“出牌”和“不要”按钮" in obs["text"][0]
+    assert "你是一个斗地主游戏陪玩 GUI agent" in obs["text"][0]
+    assert "‘出牌’和‘不要’按钮" in obs["text"][0]
     assert "<plan>" in obs["text"][0]
     assert "<action>" in obs["text"][0]
     assert obs["image"].shape == (1, 480, 640, 3)

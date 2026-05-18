@@ -224,6 +224,11 @@ def patch_forward_with_backends(
 
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
+    elif model.config.model_type in ["qwen3_5", "qwen3_5_moe"]:
+        from verl.models.transformers.qwen3_5 import forward_with_torch_backend, forward_with_triton_backend
+
+        forward_with_torch_backend_function = forward_with_torch_backend
+        forward_with_triton_backend_function = forward_with_triton_backend
     elif model.config.model_type == "glm4v":
         from verl.models.transformers.glm4v import forward_with_torch_backend, forward_with_triton_backend
 
@@ -368,6 +373,33 @@ def apply_monkey_patch(
         if ulysses_sp_size > 1:
             patch_vlm_for_ulysses_input_slicing(Qwen3VLTextModel)
             patch_vlm_for_ulysses_input_slicing(Qwen3VLMoeTextModel)
+
+    elif model.config.model_type in ["qwen3_5", "qwen3_5_moe"]:
+        # Step 1: patch model to support image-text mixed data
+        from transformers.models.qwen3_5.modeling_qwen3_5 import (
+            Qwen3_5ForConditionalGeneration,
+            Qwen3_5Model,
+            Qwen3_5VisionModel,
+        )
+        from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+            Qwen3_5MoeForConditionalGeneration,
+            Qwen3_5MoeModel,
+            Qwen3_5MoeVisionModel,
+        )
+
+        from verl.models.transformers.qwen3_5 import (
+            fast_pos_embed_interpolate,
+            forward_with_normal_backend,
+            qwen3_5_base_forward,
+        )
+
+        Qwen3_5Model.forward = qwen3_5_base_forward
+        Qwen3_5MoeModel.forward = qwen3_5_base_forward
+        Qwen3_5ForConditionalGeneration.forward = forward_with_normal_backend
+        Qwen3_5MoeForConditionalGeneration.forward = forward_with_normal_backend
+        Qwen3_5VisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
+        Qwen3_5MoeVisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
+        print(f"Monkey patch {model.__class__.__name__} model forward")
 
     elif model.config.model_type == "glm4v":
         # Step 1: patch model to support image-text mixed data

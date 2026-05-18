@@ -35,11 +35,16 @@ def parse_args():
     parser.add_argument("--model-path", default=DEFAULT_MODEL_PATH, help="Merged HF model dir, actor dir, or verl global_step dir.")
     parser.add_argument("--server-name", default="0.0.0.0")
     parser.add_argument("--server-port", type=int, default=7860)
-    parser.add_argument("--device-map", default="auto", help="Transformers device_map for model loading.")
+    parser.add_argument(
+        "--device-map",
+        default="cuda:0",
+        help="Transformers device_map for model loading. Use cuda:0/gpu0/0 for single-GPU inference, or auto for automatic dispatch.",
+    )
     parser.add_argument("--torch-dtype", default="bfloat16", choices=["auto", "float16", "bfloat16", "float32"])
-    parser.add_argument("--max-new-tokens", type=int, default=512)
-    parser.add_argument("--temperature", type=float, default=0.4)
+    parser.add_argument("--max-new-tokens", type=int, default=1024)
+    parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--enable-thinking", action="store_true", help="Pass enable_thinking=True to tokenizer.apply_chat_template for model inference.")
     parser.add_argument("--no-auto-merge", action="store_true", help="Do not auto-merge verl FSDP actor checkpoints.")
     parser.add_argument("--language", default="en", choices=["en", "zh"], help="UI/prompt language for the Dou Dizhu environment.")
     parser.add_argument("--chinese-mode", action="store_true", help="Shortcut for --language zh.")
@@ -152,30 +157,87 @@ def _torch_dtype(dtype_name: str):
     }[dtype_name]
 
 
+def _parse_device_map(device_map: str):
+    if device_map is None:
+        return None
+    normalized = str(device_map).strip().lower()
+    if not normalized or normalized in {"none", "null"}:
+        return None
+    if normalized in {"auto", "balanced", "balanced_low_0", "sequential"}:
+        return normalized
+    if normalized in {"cpu", "mps"}:
+        return {"": normalized}
+    if normalized.isdigit():
+        return {"": f"cuda:{normalized}"}
+    if normalized.startswith("gpu") and normalized[3:].isdigit():
+        return {"": f"cuda:{normalized[3:]}"}
+    if normalized.startswith("cuda"):
+        return {"": normalized}
+    return device_map
+
+
+def _get_auto_model_class(model_dir: str):
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    try:
+        from transformers import AutoModelForImageTextToText
+    except ImportError:
+        AutoModelForImageTextToText = None
+
+    try:
+        from transformers import AutoModelForVision2Seq
+    except ImportError:
+        AutoModelForVision2Seq = None
+
+    model_config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+    if (
+        AutoModelForImageTextToText is not None
+        and type(model_config) in AutoModelForImageTextToText._model_mapping.keys()
+    ):
+        return AutoModelForImageTextToText
+    if AutoModelForVision2Seq is not None and type(model_config) in AutoModelForVision2Seq._model_mapping.keys():
+        return AutoModelForVision2Seq
+    return AutoModelForCausalLM
+
+
 class DoudizhuSpectatorAgent:
     def __init__(self, model_path: str, auto_merge: bool, device_map: str, torch_dtype: str):
         import torch
-        from transformers import AutoModelForVision2Seq, AutoProcessor, AutoTokenizer
+        from transformers import AutoProcessor, AutoTokenizer
 
         self.model_dir = _resolve_model_dir(model_path, auto_merge=auto_merge)
         self.processor = AutoProcessor.from_pretrained(self.model_dir, trust_remote_code=True)
         self.tokenizer = getattr(self.processor, "tokenizer", None)
         if self.tokenizer is None:
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir, trust_remote_code=True)
-        self.model = AutoModelForVision2Seq.from_pretrained(
+        auto_model_class = _get_auto_model_class(self.model_dir)
+        self.model = auto_model_class.from_pretrained(
             self.model_dir,
             torch_dtype=_torch_dtype(torch_dtype),
-            device_map=device_map if device_map else None,
+            device_map=_parse_device_map(device_map),
             trust_remote_code=True,
         )
         self.model.eval()
         self.torch = torch
 
-    def generate_action(self, obs: np.ndarray, memory: str, max_new_tokens: int, temperature: float, top_p: float):
+    def generate_action(
+        self,
+        obs: np.ndarray,
+        memory: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        enable_thinking: bool,
+    ):
         no_memory = "没有上一轮记忆。" if CHINESE_MODE else "No previous memory."
         prompt = SPECTATOR_PROMPT_TEMPLATE.format(previous_memory=memory or no_memory)
         chat = [{"role": "user", "content": prompt}]
-        prompt_text = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+        prompt_text = self.tokenizer.apply_chat_template(
+            chat,
+            add_generation_prompt=True,
+            tokenize=False,
+            enable_thinking=bool(enable_thinking),
+        )
         prompt_text = prompt_text.replace("<image>", "<|vision_start|><|image_pad|><|vision_end|>")
         if "<|image_pad|>" not in prompt_text:
             prompt_text = "<|vision_start|><|image_pad|><|vision_end|>\n" + prompt_text
@@ -413,7 +475,16 @@ def load_spectator_model(model_path, auto_merge, device_map, torch_dtype):
         )
 
 
-def _spectator_step_core(model_path, auto_merge, device_map, torch_dtype, max_new_tokens, temperature, top_p):
+def _spectator_step_core(
+    model_path,
+    auto_merge,
+    device_map,
+    torch_dtype,
+    max_new_tokens,
+    temperature,
+    top_p,
+    enable_thinking,
+):
     global current_obs, done, spectator_memory, last_raw_response
     if current_obs is None:
         current_obs, _info = env.reset(seed=int(np.random.randint(0, 100000)))
@@ -435,6 +506,7 @@ def _spectator_step_core(model_path, auto_merge, device_map, torch_dtype, max_ne
         max_new_tokens=int(max_new_tokens),
         temperature=float(temperature),
         top_p=float(top_p),
+        enable_thinking=bool(enable_thinking),
     )
     last_raw_response = response
     overlay = annotate_clicks(obs_before, action.get("clicks", []))
@@ -482,9 +554,18 @@ def _spectator_step_core(model_path, auto_merge, device_map, torch_dtype, max_ne
     return current_obs, overlay, status, action_json, spectator_memory
 
 
-def spectator_step(model_path, auto_merge, device_map, torch_dtype, max_new_tokens, temperature, top_p):
+def spectator_step(model_path, auto_merge, device_map, torch_dtype, max_new_tokens, temperature, top_p, enable_thinking):
     try:
-        return _spectator_step_core(model_path, auto_merge, device_map, torch_dtype, max_new_tokens, temperature, top_p)
+        return _spectator_step_core(
+            model_path,
+            auto_merge,
+            device_map,
+            torch_dtype,
+            max_new_tokens,
+            temperature,
+            top_p,
+            enable_thinking,
+        )
     except Exception as exc:
         status = ui(
             f"Agent step failed:\n{type(exc).__name__}: {exc}",
@@ -494,11 +575,31 @@ def spectator_step(model_path, auto_merge, device_map, torch_dtype, max_new_toke
         return fallback_obs, fallback_obs, status, "{}", spectator_memory
 
 
-def spectator_auto_play(model_path, auto_merge, device_map, torch_dtype, max_new_tokens, temperature, top_p, steps, delay_seconds):
+def spectator_auto_play(
+    model_path,
+    auto_merge,
+    device_map,
+    torch_dtype,
+    max_new_tokens,
+    temperature,
+    top_p,
+    enable_thinking,
+    steps,
+    delay_seconds,
+):
     total_steps = max(1, int(steps))
     delay = max(0.0, float(delay_seconds))
     for _idx in range(total_steps):
-        outputs = spectator_step(model_path, auto_merge, device_map, torch_dtype, max_new_tokens, temperature, top_p)
+        outputs = spectator_step(
+            model_path,
+            auto_merge,
+            device_map,
+            torch_dtype,
+            max_new_tokens,
+            temperature,
+            top_p,
+            enable_thinking,
+        )
         yield outputs
         if done:
             break
@@ -558,6 +659,10 @@ with gr.Blocks(title=ui("Doudizhu Human and Spectator Debugger", "斗地主人�
                     max_tokens_in = gr.Number(label="max_new_tokens", value=ARGS.max_new_tokens, precision=0)
                     temp_in = gr.Number(label="temperature", value=ARGS.temperature)
                     top_p_in = gr.Number(label="top_p", value=ARGS.top_p)
+                enable_thinking_in = gr.Checkbox(
+                    label="enable_thinking",
+                    value=bool(ARGS.enable_thinking),
+                )
                 seed_in = gr.Number(label=ui("Reset Seed (blank = random)", "重置 Seed（留空为随机）"), value=None, precision=0)
                 with gr.Row():
                     load_model_btn = gr.Button(ui("Load Model", "加载模型"))
@@ -583,12 +688,23 @@ with gr.Blocks(title=ui("Doudizhu Human and Spectator Debugger", "斗地主人�
         )
         spectator_step_btn.click(
             spectator_step,
-            inputs=[model_path_in, auto_merge_in, device_map_in, dtype_in, max_tokens_in, temp_in, top_p_in],
+            inputs=[model_path_in, auto_merge_in, device_map_in, dtype_in, max_tokens_in, temp_in, top_p_in, enable_thinking_in],
             outputs=[spectator_img, spectator_overlay, spectator_status, spectator_action_json, spectator_memory_out],
         )
         auto_play_btn.click(
             spectator_auto_play,
-            inputs=[model_path_in, auto_merge_in, device_map_in, dtype_in, max_tokens_in, temp_in, top_p_in, auto_steps_in, delay_in],
+            inputs=[
+                model_path_in,
+                auto_merge_in,
+                device_map_in,
+                dtype_in,
+                max_tokens_in,
+                temp_in,
+                top_p_in,
+                enable_thinking_in,
+                auto_steps_in,
+                delay_in,
+            ],
             outputs=[spectator_img, spectator_overlay, spectator_status, spectator_action_json, spectator_memory_out],
         )
         demo.load(reset_spectator, inputs=[seed_in], outputs=[spectator_img, spectator_overlay, spectator_status, spectator_action_json, spectator_memory_out])

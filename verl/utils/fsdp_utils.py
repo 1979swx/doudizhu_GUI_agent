@@ -15,6 +15,7 @@
 import functools
 import itertools
 import json
+import logging
 import math
 import os
 from contextlib import contextmanager, nullcontext
@@ -31,6 +32,8 @@ from torch.distributed.fsdp._runtime_utils import _lazy_init
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
 from transformers.trainer_pt_utils import get_module_class_from_name
 from verl.utils.device import get_torch_device, get_device_name
+
+logger = logging.getLogger(__name__)
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
@@ -107,12 +110,27 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         policies.append(size_policy)
     elif fsdp_transformer_layer_cls_to_wrap is not None:
         transformer_cls_to_wrap = set()
+        missing_classes = []
         for layer_class in fsdp_transformer_layer_cls_to_wrap:
             transformer_cls = get_module_class_from_name(module, layer_class)
             if transformer_cls is None:
-                raise Exception("Could not find the transformer layer class to wrap in the model.")
+                # Some HF releases expose forward-compat names in _no_split_modules
+                # before the actual class exists, e.g. Qwen3.5TextDecoderLayer.
+                missing_classes.append(layer_class)
             else:
                 transformer_cls_to_wrap.add(transformer_cls)
+
+        if not transformer_cls_to_wrap:
+            raise Exception(
+                f"Could not find any transformer layer class to wrap in the model: "
+                f"{list(fsdp_transformer_layer_cls_to_wrap)}"
+            )
+        if missing_classes:
+            logger.warning(
+                "FSDP wrap policy skipped missing layer class names %s; wrapping %s",
+                missing_classes,
+                sorted(cls.__name__ for cls in transformer_cls_to_wrap),
+            )
 
         transformer_policy = functools.partial(
             transformer_auto_wrap_policy,
