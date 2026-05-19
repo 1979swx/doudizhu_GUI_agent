@@ -15,6 +15,23 @@ group_size="${GROUP_SIZE:-2}"
 lora_rank="${LORA_RANK:-8}"
 lora_alpha="${LORA_ALPHA:-16}"
 lora_target_modules="${LORA_TARGET_MODULES:-[q_proj,k_proj,v_proj,o_proj]}"
+rollout_enforce_eager="${ROLLOUT_ENFORCE_EAGER:-True}"
+
+if [[ "${lora_rank}" != "0" && "${rollout_enforce_eager}" =~ ^([Ff]alse|0)$ ]]; then
+    vllm_allows_qwen35_lora_cuda_graph="$(
+        python3 - <<'PY'
+from importlib.metadata import version
+from packaging.version import Version
+
+print("1" if Version(version("vllm")) >= Version("0.19.0") else "0")
+PY
+    )"
+    if [[ "${vllm_allows_qwen35_lora_cuda_graph}" != "1" ]]; then
+        echo "Qwen3.5 LoRA smoke requires ROLLOUT_ENFORCE_EAGER=True with vLLM < 0.19." >&2
+        echo "vLLM CUDA graph warmup creates dummy LoRAs and fails on Qwen3.5 LoRA layers before the upstream fix." >&2
+        exit 2
+    fi
+fi
 
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
 export RAY_DEDUP_LOGS="${RAY_DEDUP_LOGS:-0}"
@@ -61,7 +78,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=2048 \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0 \
-    actor_rollout_ref.rollout.enforce_eager=False \
+    actor_rollout_ref.rollout.enforce_eager="${rollout_enforce_eager}" \
     actor_rollout_ref.rollout.free_cache_engine=False \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \

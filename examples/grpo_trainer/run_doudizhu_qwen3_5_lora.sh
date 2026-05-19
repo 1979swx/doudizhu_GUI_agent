@@ -13,8 +13,8 @@ EXPERIMENT_NAME="${EXPERIMENT_NAME:-grpo_qwen3_5_4b_doudizhu_zh}"
 NUM_GPUS="${NUM_GPUS:-2}"
 
 num_cpus_per_env_worker="${NUM_CPUS_PER_ENV_WORKER:-0.1}"
-train_data_size="${TRAIN_DATA_SIZE:-4}"
-val_data_size="${VAL_DATA_SIZE:-32}"
+train_data_size="${TRAIN_DATA_SIZE:-8}"
+val_data_size="${VAL_DATA_SIZE:-64}"
 group_size="${GROUP_SIZE:-16}"
 
 max_prompt_length="${MAX_PROMPT_LENGTH:-1536}"
@@ -22,11 +22,12 @@ max_response_length="${MAX_RESPONSE_LENGTH:-1536}"
 max_env_steps="${MAX_ENV_STEPS:-30}"
 
 ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE:-128}"
-ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
-log_prob_micro_batch_size_per_gpu="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-2}"
+ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU:-2}"
+log_prob_micro_batch_size_per_gpu="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-4}"
 rollout_tp_size="${ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE:-1}"
 gpu_memory_utilization="${GPU_MEMORY_UTILIZATION:-0.6}"
 max_num_batched_tokens="${MAX_NUM_BATCHED_TOKENS:-8192}"
+rollout_load_format="${ROLLOUT_LOAD_FORMAT:-safetensors}"
 enable_gradient_checkpointing="${ENABLE_GRADIENT_CHECKPOINTING:-True}"
 ref_param_offload="${REF_PARAM_OFFLOAD:-True}"
 
@@ -64,9 +65,9 @@ python3 -m verl.trainer.main_ppo \
     +data.apply_chat_template_kwargs.enable_thinking=False \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
-    actor_rollout_ref.model.lora_rank=64 \
-    actor_rollout_ref.model.lora_alpha=128 \
-    actor_rollout_ref.model.target_modules=[q_proj,k_proj,v_proj,o_proj] \
+    actor_rollout_ref.model.lora_rank=32 \
+    actor_rollout_ref.model.lora_alpha=32 \
+    actor_rollout_ref.model.target_modules=all-linear \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing="${enable_gradient_checkpointing}" \
@@ -83,6 +84,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size="${rollout_tp_size}" \
     actor_rollout_ref.rollout.name="${ENGINE}" \
     actor_rollout_ref.rollout.gpu_memory_utilization="${gpu_memory_utilization}" \
+    actor_rollout_ref.rollout.load_format="${rollout_load_format}" \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens="${max_num_batched_tokens}" \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0 \
@@ -113,6 +115,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.resume_mode=auto \
     trainer.test_freq="${test_freq}" \
     trainer.total_epochs="${total_epochs}" \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     "${extra_args[@]}" \
     "$@"
