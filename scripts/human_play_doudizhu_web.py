@@ -1,9 +1,12 @@
-import os
-import sys
-import json
-import time
 import argparse
+import ast
+import json
+import os
+import re
+import sys
+import time
 from pathlib import Path
+
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -28,6 +31,46 @@ except ImportError as e:
 DEFAULT_MODEL_PATH = "checkpoints/verl_agent_doudizhu/grpo_qwen3_vl_4b/global_step_40"
 INITIAL_MEMORY_EN = "Initial turn. Read the screenshot, identify your hand, and plan the first landlord play."
 INITIAL_MEMORY_ZH = "初始回合。阅读截图，识别你的手牌，并规划地主首轮出牌。"
+COMMAND_PROMPT_TEMPLATE_EN = """<image>
+You are controlling the Dou Dizhu GUI by normalized clicks.
+
+Human commanded action: {command}
+
+Your only job is to execute that commanded action on the screenshot. Do not choose a different card action.
+- If the command is pass, click only the PASS button.
+- Otherwise, click each matching card in your bottom hand, then click the PLAY button.
+- Coordinates must be normalized numbers from 0 to 1000.
+
+Output exactly one XML tag named <tool_use>. Inside it, output a JSON list of computer_use calls:
+<tool_use>[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[x,y]}}}}]</tool_use>
+"""
+COMMAND_PROMPT_TEMPLATE_ZH = """<image>
+你正在通过鼠标点击来控制斗地主 GUI。
+
+人类指挥动作：{command}
+
+你的任务是在截图中执行这个人类指挥动作。不要自行选择其它出牌。
+- 你通过 [x,y] 坐标来进行点击动作，坐标必须是 0 到 1000 范围内的归一化数字，[0,0] 代表左上角，[1000,1000] 代表右下角。
+- 游戏页面的底部有手牌，其上方有‘出牌’和‘不要’按钮，这是主要交互区域。
+- 如果指挥动作是“不要”或 pass，只点击“不要”按钮。
+- 如果指挥动作是出牌，则依次点击底部手牌中与指挥动作匹配的每张牌，然后点击“出牌”按钮。
+- 也就是说，每一轮动作的最后必须以点击“出牌”或“不要”两个按钮之一结尾。
+
+输出 computer_use 工具调用的 JSON 列表，列表中的每一个元素代表一次点击。
+
+工具调用例子：
+指挥动作：不要
+[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[566,764]}}}}]
+
+指挥动作：K
+[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[804,848]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[422,751]}}}}]
+
+指挥动作：3 3
+[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[55,850]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[100,860]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[430,755]}}}}]
+
+在一个名为 <plan> 的 XML 标签中规划你的行动，然后将确切行动输出为一个名为 <tool_use> 的 XML 标签。
+当前人类指挥动作：{command}
+"""
 
 
 def parse_args():
@@ -56,10 +99,24 @@ LANGUAGE = "zh" if ARGS.chinese_mode or ARGS.language == "zh" else "en"
 CHINESE_MODE = LANGUAGE == "zh"
 INITIAL_MEMORY = INITIAL_MEMORY_ZH if CHINESE_MODE else INITIAL_MEMORY_EN
 SPECTATOR_PROMPT_TEMPLATE = DOUDIZHU_VISUAL_TEMPLATE_ZH if CHINESE_MODE else DOUDIZHU_VISUAL_TEMPLATE
+COMMAND_PROMPT_TEMPLATE = COMMAND_PROMPT_TEMPLATE_ZH if CHINESE_MODE else COMMAND_PROMPT_TEMPLATE_EN
 
 
 def ui(en: str, zh: str) -> str:
     return zh if CHINESE_MODE else en
+
+
+MODE_HUMAN = ui("Human play", "人工游玩")
+MODE_SPECTATOR = ui("Spectator mode", "旁观模式")
+MODE_COMMANDER = ui("Commander mode", "指挥模式")
+
+
+def switch_mode(mode):
+    return (
+        gr.update(visible=mode == MODE_HUMAN),
+        gr.update(visible=mode == MODE_SPECTATOR),
+        gr.update(visible=mode == MODE_COMMANDER),
+    )
 
 
 # Global state to track human interactions
@@ -200,6 +257,107 @@ def _get_auto_model_class(model_dir: str):
     return AutoModelForCausalLM
 
 
+def _extract_xml_tag(text: str, tag: str):
+    match = re.search(rf"<{tag}>(.*?)</{tag}>", text, flags=re.IGNORECASE | re.DOTALL)
+    if match is None:
+        return None
+    return match.group(1).strip()
+
+
+def _load_literal(text: str):
+    try:
+        return json.loads(text)
+    except Exception:
+        try:
+            return ast.literal_eval(text)
+        except Exception:
+            return None
+
+
+def _normalize_tool_use_list(parsed):
+    if isinstance(parsed, dict) and isinstance(parsed.get("tool_uses"), list):
+        return parsed["tool_uses"]
+    if isinstance(parsed, dict) and isinstance(parsed.get("tool_calls"), list):
+        return parsed["tool_calls"]
+    if isinstance(parsed, dict):
+        return [parsed]
+    if isinstance(parsed, list):
+        return parsed
+    return []
+
+
+def _tool_use_payload(tool_use):
+    if not isinstance(tool_use, dict):
+        return None, None
+    if isinstance(tool_use.get("function"), dict):
+        function = tool_use["function"]
+        return function.get("name"), function.get("arguments", {})
+    return tool_use.get("name"), tool_use.get("arguments", {})
+
+
+def _parse_command_coordinate(coordinate):
+    if not isinstance(coordinate, (list, tuple)) or len(coordinate) != 2:
+        return [], False
+    x, y = coordinate
+    if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return [], False
+    if not (0 <= float(x) <= 1000 and 0 <= float(y) <= 1000):
+        return [], False
+    return [float(x), float(y)], True
+
+
+def parse_command_tool_use_response(response: str, command: str, max_clicks: int):
+    tool_use_text = _extract_xml_tag(response, "tool_use") if isinstance(response, str) else None
+    parsed = _load_literal(tool_use_text or "")
+    tool_uses = _normalize_tool_use_list(parsed)
+    valid = bool(tool_use_text) and 0 < len(tool_uses) <= int(max_clicks)
+
+    clicks = []
+    normalized_tool_uses = []
+    if valid:
+        for tool_use in tool_uses:
+            name, arguments = _tool_use_payload(tool_use)
+            if isinstance(arguments, str):
+                arguments = _load_literal(arguments)
+            if name != "computer_use" or not isinstance(arguments, dict):
+                valid = False
+                break
+            if arguments.get("action") not in {"left_click", "click"}:
+                valid = False
+                break
+            click, coordinate_valid = _parse_command_coordinate(arguments.get("coordinate"))
+            if not coordinate_valid:
+                valid = False
+                break
+            clicks.append(click)
+            normalized_tool_uses.append(
+                {
+                    "name": "computer_use",
+                    "arguments": {
+                        "action": "left_click",
+                        "coordinate": click,
+                    },
+                }
+            )
+
+    if not valid:
+        clicks = []
+        normalized_tool_uses = []
+
+    return {
+        "clicks": clicks,
+        "projection_valid": int(valid),
+        "semantic_action": command.strip() if isinstance(command, str) else "",
+        "chat": "",
+        "memory": "",
+        "raw_action_text": command.strip() if isinstance(command, str) else "",
+        "raw_tool_use_text": tool_use_text or "",
+        "raw_response": response if isinstance(response, str) else "",
+        "tool_calls": normalized_tool_uses,
+        "tool_calling": len(normalized_tool_uses),
+    }
+
+
 class DoudizhuSpectatorAgent:
     def __init__(self, model_path: str, auto_merge: bool, device_map: str, torch_dtype: str):
         import torch
@@ -220,17 +378,15 @@ class DoudizhuSpectatorAgent:
         self.model.eval()
         self.torch = torch
 
-    def generate_action(
+    def _generate_response(
         self,
         obs: np.ndarray,
-        memory: str,
+        prompt: str,
         max_new_tokens: int,
         temperature: float,
         top_p: float,
         enable_thinking: bool,
     ):
-        no_memory = "没有上一轮记忆。" if CHINESE_MODE else "No previous memory."
-        prompt = SPECTATOR_PROMPT_TEMPLATE.format(previous_memory=memory or no_memory)
         chat = [{"role": "user", "content": prompt}]
         prompt_text = self.tokenizer.apply_chat_template(
             chat,
@@ -266,8 +422,49 @@ class DoudizhuSpectatorAgent:
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )[0].strip()
+        return response
+
+    def generate_action(
+        self,
+        obs: np.ndarray,
+        memory: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        enable_thinking: bool,
+    ):
+        no_memory = "没有上一轮记忆。" if CHINESE_MODE else "No previous memory."
+        prompt = SPECTATOR_PROMPT_TEMPLATE.format(previous_memory=memory or no_memory)
+        response = self._generate_response(
+            obs,
+            prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            enable_thinking=enable_thinking,
+        )
         actions, _valids = doudizhu_projection([response], max_clicks=env.max_clicks)
         return response, actions[0]
+
+    def generate_commanded_action(
+        self,
+        obs: np.ndarray,
+        command: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        enable_thinking: bool,
+    ):
+        prompt = COMMAND_PROMPT_TEMPLATE.format(command=(command or "").strip())
+        response = self._generate_response(
+            obs,
+            prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            enable_thinking=enable_thinking,
+        )
+        return response, parse_command_tool_use_response(response, command or "", max_clicks=env.max_clicks)
 
 
 def _load_spectator_agent(model_path: str, auto_merge: bool, device_map: str, torch_dtype: str):
@@ -607,10 +804,169 @@ def spectator_auto_play(
             time.sleep(delay)
 
 
-with gr.Blocks(title=ui("Doudizhu Human and Spectator Debugger", "斗地主人工与旁观调试器"), theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 斗地主 (Dou Dizhu) Agentic Environment")
+def reset_commander(seed_value):
+    global current_clicks, current_obs, done, last_raw_response
+    current_clicks = []
+    done = False
+    last_raw_response = ""
+    if seed_value is None or seed_value == "":
+        seed = int(np.random.randint(0, 100000))
+    else:
+        seed = int(seed_value)
+    current_obs, _info = env.reset(seed=seed)
+    status = ui(
+        f"Commander game reset with seed={seed}.\n"
+        "Enter a semantic card command, then click Execute Command.",
+        f"指挥游戏已重置，seed={seed}。\n"
+        "输入语义出牌指令，然后点击“执行指令”。",
+    )
+    return current_obs, current_obs, status, "{}"
 
-    with gr.Tab(ui("Human play", "人工游玩")):
+
+def initialize_pages():
+    global spectator_memory, last_raw_response
+    human_obs, human_status, clicks_json, human_memory = reset_env()
+    spectator_memory = INITIAL_MEMORY
+    last_raw_response = ""
+    spectator_status = ui(
+        "Game initialized. Load the model if needed, then click Agent Step or Auto-play.",
+        "游戏已初始化。如有需要请先加载模型，然后点击“Agent 单步”或“自动运行”。",
+    )
+    commander_status = ui(
+        "Game initialized. Enter a semantic card command, then click Execute Command.",
+        "游戏已初始化。输入语义出牌指令，然后点击“执行指令”。",
+    )
+    return (
+        human_obs,
+        human_status,
+        clicks_json,
+        human_memory,
+        human_obs,
+        human_obs,
+        spectator_status,
+        "{}",
+        spectator_memory,
+        human_obs,
+        human_obs,
+        commander_status,
+        "{}",
+    )
+
+
+def _commander_step_core(
+    model_path,
+    auto_merge,
+    device_map,
+    torch_dtype,
+    max_new_tokens,
+    temperature,
+    top_p,
+    enable_thinking,
+    command,
+):
+    global current_obs, done, last_raw_response
+    command = (command or "").strip()
+    if not command:
+        fallback_obs = current_obs if current_obs is not None else np.zeros((480, 640, 3), dtype=np.uint8)
+        return (
+            fallback_obs,
+            fallback_obs,
+            ui("Enter a commanded action first.", "请先输入指挥动作。"),
+            "{}",
+        )
+    if current_obs is None:
+        current_obs, _info = env.reset(seed=int(np.random.randint(0, 100000)))
+        done = False
+    if done:
+        return (
+            current_obs,
+            current_obs,
+            ui("Game over. Reset commander game to continue.", "游戏已结束。请重置指挥游戏后继续。"),
+            "{}",
+        )
+
+    obs_before = current_obs.copy()
+    agent = _load_spectator_agent(model_path, bool(auto_merge), device_map, torch_dtype)
+    response, action = agent.generate_commanded_action(
+        obs_before,
+        command,
+        max_new_tokens=int(max_new_tokens),
+        temperature=float(temperature),
+        top_p=float(top_p),
+        enable_thinking=bool(enable_thinking),
+    )
+    last_raw_response = response
+    overlay = annotate_clicks(obs_before, action.get("clicks", []))
+    current_obs, reward, done, info = env.step(action)
+
+    fallback = bool(info.get("fallback_used", False))
+    result = ui("FALLBACK: invalid game move", "兜底动作：无效出牌") if fallback else ui("Valid game move", "有效出牌")
+    status = ui(
+        f"Commanded action: {command}\n"
+        f"Reward: {reward:.3f} | Projection valid: {action.get('projection_valid', 0)} | "
+        f"Click valid ratio: {info.get('click_valid_ratio', 0.0):.2f}\n"
+        f"Parsed game action: {info.get('game_action')} | {result}\n"
+        f"Submit kind: {info.get('submit_kind')} | Selected cards: {info.get('selected_cards') or '-'}\n\n"
+        f"Click positions:\n{_format_clicks(action.get('clicks', []), obs_before)}",
+        f"指挥动作：{command}\n"
+        f"奖励：{reward:.3f} | 标签解析有效：{action.get('projection_valid', 0)} | "
+        f"有效点击比例：{info.get('click_valid_ratio', 0.0):.2f}\n"
+        f"解析出的游戏动作：{info.get('game_action')} | {result}\n"
+        f"提交类型：{info.get('submit_kind')} | 选中的牌：{info.get('selected_cards') or '-'}\n\n"
+        f"点击位置：\n{_format_clicks(action.get('clicks', []), obs_before)}",
+    )
+    if done:
+        won = bool(info.get("won", 0))
+        status += ui(
+            f"\n\nGame over. {'Player 0 won.' if won else 'Player 0 lost.'}",
+            f"\n\n游戏结束。玩家 0 {'赢了。' if won else '输了。'}",
+        )
+
+    action_json = json.dumps(
+        {
+            "commanded_action": command,
+            "clicks": action.get("clicks", []),
+            "projection_valid": action.get("projection_valid", 0),
+            "raw_tool_use_text": action.get("raw_tool_use_text", ""),
+            "raw_response": response,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    return current_obs, overlay, status, action_json
+
+
+def commander_step(model_path, auto_merge, device_map, torch_dtype, max_new_tokens, temperature, top_p, enable_thinking, command):
+    try:
+        return _commander_step_core(
+            model_path,
+            auto_merge,
+            device_map,
+            torch_dtype,
+            max_new_tokens,
+            temperature,
+            top_p,
+            enable_thinking,
+            command,
+        )
+    except Exception as exc:
+        status = ui(
+            f"Commander step failed:\n{type(exc).__name__}: {exc}",
+            f"指挥单步失败：\n{type(exc).__name__}: {exc}",
+        )
+        fallback_obs = current_obs if current_obs is not None else np.zeros((480, 640, 3), dtype=np.uint8)
+        return fallback_obs, fallback_obs, status, "{}"
+
+
+with gr.Blocks(title=ui("Doudizhu Human, Commander, and Spectator Debugger", "斗地主人工、指挥与旁观调试器"), theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 斗地主 (Dou Dizhu) Agentic Environment")
+    mode_selector = gr.Radio(
+        [MODE_HUMAN, MODE_SPECTATOR, MODE_COMMANDER],
+        value=MODE_HUMAN,
+        label=ui("Page", "页面"),
+    )
+
+    with gr.Group(visible=True) as human_page:
         gr.Markdown(
             ui(
                 "Click on the game UI to simulate the LLM's coordinate outputs, then submit them to the environment.",
@@ -632,13 +988,7 @@ with gr.Blocks(title=ui("Doudizhu Human and Spectator Debugger", "斗地主人�
                 chat_in = gr.Textbox(label="<chat>", placeholder=ui("Say something to the peasants...", "给农民玩家说一句话..."))
                 memory_in = gr.Textbox(label="<memory>", placeholder=ui("Write a note to yourself for the next turn...", "给下一轮写一条记忆..."))
 
-        img.select(handle_click, outputs=[status_out, clicks_out])
-        clear_btn.click(clear_clicks, outputs=[status_out, clicks_out])
-        reset_btn.click(reset_env, outputs=[img, status_out, clicks_out, memory_in])
-        step_btn.click(step_env, inputs=[chat_in, memory_in], outputs=[img, status_out, clicks_out, memory_in])
-        demo.load(reset_env, outputs=[img, status_out, clicks_out, memory_in])
-
-    with gr.Tab(ui("Spectator mode", "旁观模式")):
+    with gr.Group(visible=False) as spectator_page:
         gr.Markdown(
             ui(
                 "Watch a trained VL agent play. The right image marks the exact normalized click coordinates on the pre-action game screen.",
@@ -676,38 +1026,129 @@ with gr.Blocks(title=ui("Doudizhu Human and Spectator Debugger", "斗地主人�
                 spectator_action_json = gr.Textbox(label=ui("Projected Action / Raw Response", "投影动作 / 原始响应"), lines=12, interactive=False)
                 spectator_memory_out = gr.Textbox(label=ui("Model Memory", "模型记忆"), lines=3, interactive=False)
 
-        spectator_reset_btn.click(
-            reset_spectator,
-            inputs=[seed_in],
-            outputs=[spectator_img, spectator_overlay, spectator_status, spectator_action_json, spectator_memory_out],
+    with gr.Group(visible=False) as commander_page:
+        gr.Markdown(
+            ui(
+                "Give the semantic card action yourself; the model only converts that command into GUI computer_use clicks.",
+                "由人输入语义出牌动作；模型只负责把该指令转换成 GUI computer_use 点击。",
+            )
         )
-        load_model_btn.click(
-            load_spectator_model,
-            inputs=[model_path_in, auto_merge_in, device_map_in, dtype_in],
-            outputs=[spectator_status],
-        )
-        spectator_step_btn.click(
-            spectator_step,
-            inputs=[model_path_in, auto_merge_in, device_map_in, dtype_in, max_tokens_in, temp_in, top_p_in, enable_thinking_in],
-            outputs=[spectator_img, spectator_overlay, spectator_status, spectator_action_json, spectator_memory_out],
-        )
-        auto_play_btn.click(
-            spectator_auto_play,
-            inputs=[
-                model_path_in,
-                auto_merge_in,
-                device_map_in,
-                dtype_in,
-                max_tokens_in,
-                temp_in,
-                top_p_in,
-                enable_thinking_in,
-                auto_steps_in,
-                delay_in,
-            ],
-            outputs=[spectator_img, spectator_overlay, spectator_status, spectator_action_json, spectator_memory_out],
-        )
-        demo.load(reset_spectator, inputs=[seed_in], outputs=[spectator_img, spectator_overlay, spectator_status, spectator_action_json, spectator_memory_out])
+        with gr.Row():
+            with gr.Column(scale=2):
+                commander_img = gr.Image(interactive=False, label=ui("Current Observation After Command", "指令执行后的当前观察"))
+                commander_overlay = gr.Image(interactive=False, label=ui("Last Command Click Overlay", "上一条指令点击标注"))
+            with gr.Column(scale=1):
+                commander_model_path_in = gr.Textbox(label=ui("Model / Checkpoint Path", "模型 / checkpoint 路径"), value=ARGS.model_path)
+                commander_auto_merge_in = gr.Checkbox(label=ui("Auto-merge verl FSDP checkpoint if needed", "需要时自动合并 verl FSDP checkpoint"), value=not ARGS.no_auto_merge)
+                with gr.Row():
+                    commander_device_map_in = gr.Textbox(label="device_map", value=ARGS.device_map)
+                    commander_dtype_in = gr.Dropdown(["auto", "float16", "bfloat16", "float32"], label="torch_dtype", value=ARGS.torch_dtype)
+                with gr.Row():
+                    commander_max_tokens_in = gr.Number(label="max_new_tokens", value=min(512, ARGS.max_new_tokens), precision=0)
+                    commander_temp_in = gr.Number(label="temperature", value=0.0)
+                    commander_top_p_in = gr.Number(label="top_p", value=ARGS.top_p)
+                commander_enable_thinking_in = gr.Checkbox(
+                    label="enable_thinking",
+                    value=bool(ARGS.enable_thinking),
+                )
+                commander_seed_in = gr.Number(label=ui("Reset Seed (blank = random)", "重置 Seed（留空为随机）"), value=None, precision=0)
+                commander_command_in = gr.Textbox(
+                    label=ui("Commanded Action", "指挥动作"),
+                    placeholder=ui("Examples: 3 3, 10 J Q K A, pass", "例如：3 3、10 J Q K A、不要"),
+                )
+                with gr.Row():
+                    commander_load_model_btn = gr.Button(ui("Load Model", "加载模型"))
+                    commander_reset_btn = gr.Button(ui("Reset Commander Game", "重置指挥游戏"))
+                commander_step_btn = gr.Button(ui("Execute Command", "执行指令"), variant="primary")
+                commander_status = gr.Textbox(label=ui("Commander Status", "指挥状态"), lines=12)
+                commander_action_json = gr.Textbox(label=ui("Projected tool_use / Raw Response", "投影 tool_use / 原始响应"), lines=12, interactive=False)
+
+    mode_selector.change(
+        switch_mode,
+        inputs=[mode_selector],
+        outputs=[human_page, spectator_page, commander_page],
+    )
+
+    img.select(handle_click, outputs=[status_out, clicks_out])
+    clear_btn.click(clear_clicks, outputs=[status_out, clicks_out])
+    reset_btn.click(reset_env, outputs=[img, status_out, clicks_out, memory_in])
+    step_btn.click(step_env, inputs=[chat_in, memory_in], outputs=[img, status_out, clicks_out, memory_in])
+    demo.load(
+        initialize_pages,
+        outputs=[
+            img,
+            status_out,
+            clicks_out,
+            memory_in,
+            spectator_img,
+            spectator_overlay,
+            spectator_status,
+            spectator_action_json,
+            spectator_memory_out,
+            commander_img,
+            commander_overlay,
+            commander_status,
+            commander_action_json,
+        ],
+    )
+
+    spectator_reset_btn.click(
+        reset_spectator,
+        inputs=[seed_in],
+        outputs=[spectator_img, spectator_overlay, spectator_status, spectator_action_json, spectator_memory_out],
+    )
+    load_model_btn.click(
+        load_spectator_model,
+        inputs=[model_path_in, auto_merge_in, device_map_in, dtype_in],
+        outputs=[spectator_status],
+    )
+    spectator_step_btn.click(
+        spectator_step,
+        inputs=[model_path_in, auto_merge_in, device_map_in, dtype_in, max_tokens_in, temp_in, top_p_in, enable_thinking_in],
+        outputs=[spectator_img, spectator_overlay, spectator_status, spectator_action_json, spectator_memory_out],
+    )
+    auto_play_btn.click(
+        spectator_auto_play,
+        inputs=[
+            model_path_in,
+            auto_merge_in,
+            device_map_in,
+            dtype_in,
+            max_tokens_in,
+            temp_in,
+            top_p_in,
+            enable_thinking_in,
+            auto_steps_in,
+            delay_in,
+        ],
+        outputs=[spectator_img, spectator_overlay, spectator_status, spectator_action_json, spectator_memory_out],
+    )
+
+    commander_reset_btn.click(
+        reset_commander,
+        inputs=[commander_seed_in],
+        outputs=[commander_img, commander_overlay, commander_status, commander_action_json],
+    )
+    commander_load_model_btn.click(
+        load_spectator_model,
+        inputs=[commander_model_path_in, commander_auto_merge_in, commander_device_map_in, commander_dtype_in],
+        outputs=[commander_status],
+    )
+    commander_step_btn.click(
+        commander_step,
+        inputs=[
+            commander_model_path_in,
+            commander_auto_merge_in,
+            commander_device_map_in,
+            commander_dtype_in,
+            commander_max_tokens_in,
+            commander_temp_in,
+            commander_top_p_in,
+            commander_enable_thinking_in,
+            commander_command_in,
+        ],
+        outputs=[commander_img, commander_overlay, commander_status, commander_action_json],
+    )
 
 if __name__ == "__main__":
     print("Starting Gradio server...")
