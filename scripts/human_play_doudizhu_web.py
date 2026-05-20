@@ -1,12 +1,73 @@
 import argparse
 import ast
+import base64
+import io
 import json
 import os
 import re
 import sys
 import time
 from pathlib import Path
+from urllib import request as urllib_request
+from urllib.error import HTTPError, URLError
 
+# Usage
+# -----
+# This script starts a Gradio debugger for the Dou Dizhu GUI environment.
+# It has three pages:
+#   1. Human play: manually click the observation image, then submit the clicks
+#      to the environment.
+#   2. Spectator mode: a VL model reads the screenshot and chooses the full
+#      card action and GUI clicks by itself.
+#   3. Commander mode: you type a semantic card action such as "3 3",
+#      "10 J Q K A", or "不要"; the model only converts that command into GUI
+#      clicks.
+#
+# Basic local-model run:
+#   conda activate verl-agent-bw
+#   python scripts/human_play_doudizhu_web.py \
+#     --model-backend local \
+#     --model-path checkpoints/verl_agent_doudizhu/grpo_qwen3_vl_4b/global_step_40 \
+#     --chinese-mode
+#
+# Local-model notes:
+#   --model-path can be a merged HuggingFace model directory, an actor
+#   directory, or a verl global_step directory. Unmerged FSDP actor checkpoints
+#   are auto-merged by default. Use --no-auto-merge to disable this.
+#   --device-map, --torch-dtype, --max-new-tokens, --temperature, --top-p, and
+#   --enable-thinking control local Transformers generation.
+#
+# OpenAI-compatible API run:
+#   export OPENAI_API_KEY=...
+#   conda activate verl-agent-bw
+#   python scripts/human_play_doudizhu_web.py \
+#     --model-backend api \
+#     --api-base-url https://api.openai.com/v1 \
+#     --api-model <vision-model-name> \
+#     --api-key-env OPENAI_API_KEY \
+#     --chinese-mode
+#
+# Kimi/Moonshot example:
+#   export MOONSHOT_API_KEY=...
+#   conda activate verl-agent-bw
+#   python scripts/human_play_doudizhu_web.py \
+#     --model-backend api \
+#     --api-base-url https://api.moonshot.cn/v1 \
+#     --api-model kimi-k2.6 \
+#     --api-key-env MOONSHOT_API_KEY \
+#     --chinese-mode
+#
+# API backend notes:
+#   The API backend sends the current screenshot as a PNG data URL in an
+#   OpenAI-compatible chat/completions request. The API response must still
+#   follow this script's XML/JSON prompt format, because the existing
+#   doudizhu_projection and command parser are reused. There is intentionally
+#   no format-repair or retry layer; invalid model output is surfaced directly
+#   in the UI. The default temperature is 1.0.
+#
+# Web server:
+#   --server-name defaults to 0.0.0.0 and --server-port defaults to 7860.
+#
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -44,12 +105,12 @@ Your only job is to execute that commanded action on the screenshot. Do not choo
 Output exactly one XML tag named <tool_use>. Inside it, output a JSON list of computer_use calls:
 <tool_use>[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[x,y]}}}}]</tool_use>
 """
-COMMAND_PROMPT_TEMPLATE_ZH = """<image>
+COMMAND_PROMPT_TEMPLATE_ZH = """
 你正在通过鼠标点击来控制斗地主 GUI。
 
 人类指挥动作：{command}
 
-你的任务是在截图中执行这个人类指挥动作。不要自行选择其它出牌。
+<image>你的任务是在截图中执行这个人类指挥动作。不要自行选择其它出牌。
 - 你通过 [x,y] 坐标来进行点击动作，坐标必须是 0 到 1000 范围内的归一化数字，[0,0] 代表左上角，[1000,1000] 代表右下角。
 - 游戏页面的底部有手牌，其上方有‘出牌’和‘不要’按钮，这是主要交互区域。
 - 如果指挥动作是“不要”或 pass，只点击“不要”按钮。
@@ -89,6 +150,12 @@ def parse_args():
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--enable-thinking", action="store_true", help="Pass enable_thinking=True to tokenizer.apply_chat_template for model inference.")
     parser.add_argument("--no-auto-merge", action="store_true", help="Do not auto-merge verl FSDP actor checkpoints.")
+    parser.add_argument("--model-backend", default="local", choices=["local", "api"], help="Inference backend for spectator/commander modes.")
+    parser.add_argument("--api-base-url", default=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"), help="OpenAI-compatible API base URL.")
+    parser.add_argument("--api-model", default=os.environ.get("DOUDIZHU_API_MODEL", ""), help="Model name for API backend.")
+    parser.add_argument("--api-key-env", default="OPENAI_API_KEY", help="Environment variable that stores the API key.")
+    parser.add_argument("--api-timeout", type=float, default=60.0, help="API request timeout in seconds.")
+    parser.add_argument("--api-thinking", default="default", choices=["default", "enabled", "disabled"], help="Optional Kimi-compatible thinking setting for API backend.")
     parser.add_argument("--language", default="en", choices=["en", "zh"], help="UI/prompt language for the Dou Dizhu environment.")
     parser.add_argument("--chinese-mode", action="store_true", help="Shortcut for --language zh.")
     return parser.parse_args()
@@ -467,17 +534,196 @@ class DoudizhuSpectatorAgent:
         return response, parse_command_tool_use_response(response, command or "", max_clicks=env.max_clicks)
 
 
-def _load_spectator_agent(model_path: str, auto_merge: bool, device_map: str, torch_dtype: str):
+def _api_chat_url(base_url: str) -> str:
+    base_url = (base_url or "").strip().rstrip("/")
+    if not base_url:
+        raise ValueError("API base URL is empty.")
+    if base_url.endswith("/chat/completions"):
+        return base_url
+    return f"{base_url}/chat/completions"
+
+
+def _image_data_url(obs: np.ndarray) -> str:
+    image = Image.fromarray(obs.astype(np.uint8)).convert("RGB")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _message_content_to_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(parts)
+    return "" if content is None else str(content)
+
+
+class DoudizhuApiAgent:
+    def __init__(self, base_url: str, model: str, api_key_env: str, timeout: float, thinking: str):
+        self.base_url = (base_url or "").strip()
+        self.model = (model or "").strip()
+        self.api_key_env = (api_key_env or "").strip()
+        self.timeout = float(timeout)
+        self.thinking = (thinking or "default").strip()
+        if not self.model:
+            raise ValueError("API model is empty. Set --api-model or fill the API model field.")
+        if not self.api_key_env:
+            raise ValueError("API key env var name is empty.")
+        if not os.environ.get(self.api_key_env):
+            raise ValueError(f"API key env var {self.api_key_env!r} is not set.")
+        if self.thinking not in {"default", "enabled", "disabled"}:
+            raise ValueError("API thinking must be one of: default, enabled, disabled.")
+
+    def _generate_response(
+        self,
+        obs: np.ndarray,
+        prompt: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        enable_thinking: bool,
+    ):
+        del enable_thinking
+        prompt_text = (prompt or "").replace("<image>", "The current screenshot is attached.")
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": _image_data_url(obs)}},
+                        {"type": "text", "text": prompt_text},
+                    ],
+                }
+            ],
+            "max_tokens": int(max_new_tokens),
+        }
+        if self.thinking != "default":
+            payload["thinking"] = {"type": self.thinking}
+        if self.thinking != "disabled":
+            payload["temperature"] = float(temperature)
+            payload["top_p"] = float(top_p)
+        data = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Authorization": f"Bearer {os.environ[self.api_key_env]}",
+            "Content-Type": "application/json",
+        }
+        req = urllib_request.Request(_api_chat_url(self.base_url), data=data, headers=headers, method="POST")
+        try:
+            with urllib_request.urlopen(req, timeout=self.timeout) as resp:
+                body = resp.read().decode("utf-8")
+        except HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"API request failed with HTTP {exc.code}: {error_body}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"API request failed: {exc}") from exc
+
+        parsed = json.loads(body)
+        choices = parsed.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError(f"API response has no choices: {body}")
+        first = choices[0]
+        if isinstance(first, dict):
+            message = first.get("message")
+            if isinstance(message, dict):
+                return _message_content_to_text(message.get("content")).strip()
+            return _message_content_to_text(first.get("text")).strip()
+        raise RuntimeError(f"API response choice is invalid: {body}")
+
+    def generate_action(
+        self,
+        obs: np.ndarray,
+        memory: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        enable_thinking: bool,
+    ):
+        no_memory = "没有上一轮记忆。" if CHINESE_MODE else "No previous memory."
+        prompt = SPECTATOR_PROMPT_TEMPLATE.format(previous_memory=memory or no_memory)
+        response = self._generate_response(
+            obs,
+            prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            enable_thinking=enable_thinking,
+        )
+        actions, _valids = doudizhu_projection([response], max_clicks=env.max_clicks)
+        return response, actions[0]
+
+    def generate_commanded_action(
+        self,
+        obs: np.ndarray,
+        command: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        enable_thinking: bool,
+    ):
+        prompt = COMMAND_PROMPT_TEMPLATE.format(command=(command or "").strip())
+        response = self._generate_response(
+            obs,
+            prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            enable_thinking=enable_thinking,
+        )
+        return response, parse_command_tool_use_response(response, command or "", max_clicks=env.max_clicks)
+
+
+def _load_spectator_agent(
+    model_backend: str,
+    model_path: str,
+    auto_merge: bool,
+    device_map: str,
+    torch_dtype: str,
+    api_base_url: str,
+    api_model: str,
+    api_key_env: str,
+    api_timeout: float,
+    api_thinking: str,
+):
     global spectator_agent, spectator_agent_key
-    key = (model_path, bool(auto_merge), device_map, torch_dtype)
+    key = (
+        model_backend,
+        model_path,
+        bool(auto_merge),
+        device_map,
+        torch_dtype,
+        api_base_url,
+        api_model,
+        api_key_env,
+        float(api_timeout),
+        api_thinking,
+    )
     if spectator_agent is not None and spectator_agent_key == key:
         return spectator_agent
-    spectator_agent = DoudizhuSpectatorAgent(
-        model_path=model_path,
-        auto_merge=auto_merge,
-        device_map=device_map,
-        torch_dtype=torch_dtype,
-    )
+    if model_backend == "api":
+        spectator_agent = DoudizhuApiAgent(
+            base_url=api_base_url,
+            model=api_model,
+            api_key_env=api_key_env,
+            timeout=api_timeout,
+            thinking=api_thinking,
+        )
+    else:
+        spectator_agent = DoudizhuSpectatorAgent(
+            model_path=model_path,
+            auto_merge=auto_merge,
+            device_map=device_map,
+            torch_dtype=torch_dtype,
+        )
     spectator_agent_key = key
     return spectator_agent
 
@@ -502,7 +748,7 @@ def annotate_clicks(obs: np.ndarray, clicks):
     image = Image.fromarray(obs.astype(np.uint8)).convert("RGB")
     draw = ImageDraw.Draw(image, "RGBA")
     font = _load_overlay_font(15)
-    small_font = _load_overlay_font(12)
+    small_font = _load_overlay_font(13)
     colors = [
         (255, 64, 64, 235),
         (255, 190, 48, 235),
@@ -661,9 +907,25 @@ def reset_spectator(seed_value):
     return current_obs, current_obs, status, "{}", spectator_memory
 
 
-def load_spectator_model(model_path, auto_merge, device_map, torch_dtype):
+def load_spectator_model(model_backend, model_path, auto_merge, device_map, torch_dtype, api_base_url, api_model, api_key_env, api_timeout, api_thinking):
     try:
-        agent = _load_spectator_agent(model_path, bool(auto_merge), device_map, torch_dtype)
+        agent = _load_spectator_agent(
+            model_backend,
+            model_path,
+            bool(auto_merge),
+            device_map,
+            torch_dtype,
+            api_base_url,
+            api_model,
+            api_key_env,
+            api_timeout,
+            api_thinking,
+        )
+        if model_backend == "api":
+            return ui(
+                f"API backend configured:\n{agent.model} @ {_api_chat_url(agent.base_url)}\nAPI key env: {agent.api_key_env}\nthinking: {agent.thinking}",
+                f"API 后端已配置：\n{agent.model} @ {_api_chat_url(agent.base_url)}\nAPI key 环境变量：{agent.api_key_env}\nthinking：{agent.thinking}",
+            )
         return ui(f"Model loaded from:\n{agent.model_dir}", f"模型已加载：\n{agent.model_dir}")
     except Exception as exc:
         return ui(
@@ -673,10 +935,16 @@ def load_spectator_model(model_path, auto_merge, device_map, torch_dtype):
 
 
 def _spectator_step_core(
+    model_backend,
     model_path,
     auto_merge,
     device_map,
     torch_dtype,
+    api_base_url,
+    api_model,
+    api_key_env,
+    api_timeout,
+    api_thinking,
     max_new_tokens,
     temperature,
     top_p,
@@ -696,7 +964,18 @@ def _spectator_step_core(
         )
 
     obs_before = current_obs.copy()
-    agent = _load_spectator_agent(model_path, bool(auto_merge), device_map, torch_dtype)
+    agent = _load_spectator_agent(
+        model_backend,
+        model_path,
+        bool(auto_merge),
+        device_map,
+        torch_dtype,
+        api_base_url,
+        api_model,
+        api_key_env,
+        api_timeout,
+        api_thinking,
+    )
     response, action = agent.generate_action(
         obs_before,
         spectator_memory,
@@ -751,13 +1030,19 @@ def _spectator_step_core(
     return current_obs, overlay, status, action_json, spectator_memory
 
 
-def spectator_step(model_path, auto_merge, device_map, torch_dtype, max_new_tokens, temperature, top_p, enable_thinking):
+def spectator_step(model_backend, model_path, auto_merge, device_map, torch_dtype, api_base_url, api_model, api_key_env, api_timeout, api_thinking, max_new_tokens, temperature, top_p, enable_thinking):
     try:
         return _spectator_step_core(
+            model_backend,
             model_path,
             auto_merge,
             device_map,
             torch_dtype,
+            api_base_url,
+            api_model,
+            api_key_env,
+            api_timeout,
+            api_thinking,
             max_new_tokens,
             temperature,
             top_p,
@@ -773,10 +1058,16 @@ def spectator_step(model_path, auto_merge, device_map, torch_dtype, max_new_toke
 
 
 def spectator_auto_play(
+    model_backend,
     model_path,
     auto_merge,
     device_map,
     torch_dtype,
+    api_base_url,
+    api_model,
+    api_key_env,
+    api_timeout,
+    api_thinking,
     max_new_tokens,
     temperature,
     top_p,
@@ -788,10 +1079,16 @@ def spectator_auto_play(
     delay = max(0.0, float(delay_seconds))
     for _idx in range(total_steps):
         outputs = spectator_step(
+            model_backend,
             model_path,
             auto_merge,
             device_map,
             torch_dtype,
+            api_base_url,
+            api_model,
+            api_key_env,
+            api_timeout,
+            api_thinking,
             max_new_tokens,
             temperature,
             top_p,
@@ -854,10 +1151,16 @@ def initialize_pages():
 
 
 def _commander_step_core(
+    model_backend,
     model_path,
     auto_merge,
     device_map,
     torch_dtype,
+    api_base_url,
+    api_model,
+    api_key_env,
+    api_timeout,
+    api_thinking,
     max_new_tokens,
     temperature,
     top_p,
@@ -886,7 +1189,18 @@ def _commander_step_core(
         )
 
     obs_before = current_obs.copy()
-    agent = _load_spectator_agent(model_path, bool(auto_merge), device_map, torch_dtype)
+    agent = _load_spectator_agent(
+        model_backend,
+        model_path,
+        bool(auto_merge),
+        device_map,
+        torch_dtype,
+        api_base_url,
+        api_model,
+        api_key_env,
+        api_timeout,
+        api_thinking,
+    )
     response, action = agent.generate_commanded_action(
         obs_before,
         command,
@@ -936,13 +1250,19 @@ def _commander_step_core(
     return current_obs, overlay, status, action_json
 
 
-def commander_step(model_path, auto_merge, device_map, torch_dtype, max_new_tokens, temperature, top_p, enable_thinking, command):
+def commander_step(model_backend, model_path, auto_merge, device_map, torch_dtype, api_base_url, api_model, api_key_env, api_timeout, api_thinking, max_new_tokens, temperature, top_p, enable_thinking, command):
     try:
         return _commander_step_core(
+            model_backend,
             model_path,
             auto_merge,
             device_map,
             torch_dtype,
+            api_base_url,
+            api_model,
+            api_key_env,
+            api_timeout,
+            api_thinking,
             max_new_tokens,
             temperature,
             top_p,
@@ -1000,11 +1320,18 @@ with gr.Blocks(title=ui("Doudizhu Human, Commander, and Spectator Debugger", "�
                 spectator_img = gr.Image(interactive=False, label=ui("Current Observation After Agent Move", "Agent 动作后的当前观察"))
                 spectator_overlay = gr.Image(interactive=False, label=ui("Last Agent Click Overlay", "上一轮 Agent 点击标注"))
             with gr.Column(scale=1):
+                model_backend_in = gr.Dropdown(["local", "api"], label=ui("Model Backend", "模型后端"), value=ARGS.model_backend)
                 model_path_in = gr.Textbox(label=ui("Model / Checkpoint Path", "模型 / checkpoint 路径"), value=ARGS.model_path)
                 auto_merge_in = gr.Checkbox(label=ui("Auto-merge verl FSDP checkpoint if needed", "需要时自动合并 verl FSDP checkpoint"), value=not ARGS.no_auto_merge)
                 with gr.Row():
                     device_map_in = gr.Textbox(label="device_map", value=ARGS.device_map)
                     dtype_in = gr.Dropdown(["auto", "float16", "bfloat16", "float32"], label="torch_dtype", value=ARGS.torch_dtype)
+                api_base_url_in = gr.Textbox(label=ui("API Base URL (OpenAI-compatible)", "API Base URL（OpenAI 兼容）"), value=ARGS.api_base_url)
+                api_model_in = gr.Textbox(label=ui("API Model", "API 模型"), value=ARGS.api_model)
+                with gr.Row():
+                    api_key_env_in = gr.Textbox(label=ui("API Key Env", "API Key 环境变量"), value=ARGS.api_key_env)
+                    api_timeout_in = gr.Number(label=ui("API Timeout", "API 超时"), value=ARGS.api_timeout)
+                    api_thinking_in = gr.Dropdown(["default", "enabled", "disabled"], label="API thinking", value=ARGS.api_thinking)
                 with gr.Row():
                     max_tokens_in = gr.Number(label="max_new_tokens", value=ARGS.max_new_tokens, precision=0)
                     temp_in = gr.Number(label="temperature", value=ARGS.temperature)
@@ -1038,14 +1365,21 @@ with gr.Blocks(title=ui("Doudizhu Human, Commander, and Spectator Debugger", "�
                 commander_img = gr.Image(interactive=False, label=ui("Current Observation After Command", "指令执行后的当前观察"))
                 commander_overlay = gr.Image(interactive=False, label=ui("Last Command Click Overlay", "上一条指令点击标注"))
             with gr.Column(scale=1):
+                commander_model_backend_in = gr.Dropdown(["local", "api"], label=ui("Model Backend", "模型后端"), value=ARGS.model_backend)
                 commander_model_path_in = gr.Textbox(label=ui("Model / Checkpoint Path", "模型 / checkpoint 路径"), value=ARGS.model_path)
                 commander_auto_merge_in = gr.Checkbox(label=ui("Auto-merge verl FSDP checkpoint if needed", "需要时自动合并 verl FSDP checkpoint"), value=not ARGS.no_auto_merge)
                 with gr.Row():
                     commander_device_map_in = gr.Textbox(label="device_map", value=ARGS.device_map)
                     commander_dtype_in = gr.Dropdown(["auto", "float16", "bfloat16", "float32"], label="torch_dtype", value=ARGS.torch_dtype)
+                commander_api_base_url_in = gr.Textbox(label=ui("API Base URL (OpenAI-compatible)", "API Base URL（OpenAI 兼容）"), value=ARGS.api_base_url)
+                commander_api_model_in = gr.Textbox(label=ui("API Model", "API 模型"), value=ARGS.api_model)
+                with gr.Row():
+                    commander_api_key_env_in = gr.Textbox(label=ui("API Key Env", "API Key 环境变量"), value=ARGS.api_key_env)
+                    commander_api_timeout_in = gr.Number(label=ui("API Timeout", "API 超时"), value=ARGS.api_timeout)
+                    commander_api_thinking_in = gr.Dropdown(["default", "enabled", "disabled"], label="API thinking", value=ARGS.api_thinking)
                 with gr.Row():
                     commander_max_tokens_in = gr.Number(label="max_new_tokens", value=min(512, ARGS.max_new_tokens), precision=0)
-                    commander_temp_in = gr.Number(label="temperature", value=0.0)
+                    commander_temp_in = gr.Number(label="temperature", value=ARGS.temperature)
                     commander_top_p_in = gr.Number(label="top_p", value=ARGS.top_p)
                 commander_enable_thinking_in = gr.Checkbox(
                     label="enable_thinking",
@@ -1099,21 +1433,27 @@ with gr.Blocks(title=ui("Doudizhu Human, Commander, and Spectator Debugger", "�
     )
     load_model_btn.click(
         load_spectator_model,
-        inputs=[model_path_in, auto_merge_in, device_map_in, dtype_in],
+        inputs=[model_backend_in, model_path_in, auto_merge_in, device_map_in, dtype_in, api_base_url_in, api_model_in, api_key_env_in, api_timeout_in, api_thinking_in],
         outputs=[spectator_status],
     )
     spectator_step_btn.click(
         spectator_step,
-        inputs=[model_path_in, auto_merge_in, device_map_in, dtype_in, max_tokens_in, temp_in, top_p_in, enable_thinking_in],
+        inputs=[model_backend_in, model_path_in, auto_merge_in, device_map_in, dtype_in, api_base_url_in, api_model_in, api_key_env_in, api_timeout_in, api_thinking_in, max_tokens_in, temp_in, top_p_in, enable_thinking_in],
         outputs=[spectator_img, spectator_overlay, spectator_status, spectator_action_json, spectator_memory_out],
     )
     auto_play_btn.click(
         spectator_auto_play,
         inputs=[
+            model_backend_in,
             model_path_in,
             auto_merge_in,
             device_map_in,
             dtype_in,
+            api_base_url_in,
+            api_model_in,
+            api_key_env_in,
+            api_timeout_in,
+            api_thinking_in,
             max_tokens_in,
             temp_in,
             top_p_in,
@@ -1131,16 +1471,33 @@ with gr.Blocks(title=ui("Doudizhu Human, Commander, and Spectator Debugger", "�
     )
     commander_load_model_btn.click(
         load_spectator_model,
-        inputs=[commander_model_path_in, commander_auto_merge_in, commander_device_map_in, commander_dtype_in],
+        inputs=[
+            commander_model_backend_in,
+            commander_model_path_in,
+            commander_auto_merge_in,
+            commander_device_map_in,
+            commander_dtype_in,
+            commander_api_base_url_in,
+            commander_api_model_in,
+            commander_api_key_env_in,
+            commander_api_timeout_in,
+            commander_api_thinking_in,
+        ],
         outputs=[commander_status],
     )
     commander_step_btn.click(
         commander_step,
         inputs=[
+            commander_model_backend_in,
             commander_model_path_in,
             commander_auto_merge_in,
             commander_device_map_in,
             commander_dtype_in,
+            commander_api_base_url_in,
+            commander_api_model_in,
+            commander_api_key_env_in,
+            commander_api_timeout_in,
+            commander_api_thinking_in,
             commander_max_tokens_in,
             commander_temp_in,
             commander_top_p_in,
