@@ -23,6 +23,7 @@ TEXT = {
         "cards_left": "cards left",
         "play": "PLAY",
         "pass": "PASS",
+        "your_turn": "Your turn",
         "instruction": "Click cards, then PLAY above your hand. Click PASS to skip when allowed.",
         "player_short": "P",
     },
@@ -34,6 +35,7 @@ TEXT = {
         "cards_left": "剩余{count}张牌",
         "play": "出牌",
         "pass": "不要",
+        "your_turn": "轮到你出牌了",
         "instruction": "点击手牌，再点击上方“出牌”。允许过牌时点击“不要”。",
         "player_short": "玩家",
     },
@@ -238,14 +240,38 @@ class DoudizhuRenderer:
             self.width // 2 - 92,
             264,
             align="center",
+            prompt=self.text["your_turn"],
         )
 
-    def _draw_play_area(self, draw: ImageDraw.ImageDraw, label: str, action: Optional[str], x: int, y: int, align: str):
+    def _draw_play_area(
+        self,
+        draw: ImageDraw.ImageDraw,
+        label: str,
+        action: Optional[str],
+        x: int,
+        y: int,
+        align: str,
+        prompt: Optional[str] = None,
+    ):
         area_w = 184
         area_h = 64
-        draw.rounded_rectangle((x, y, x + area_w, y + area_h), radius=6, fill=(41, 92, 67), outline=(207, 224, 184), width=1)
+        draw.rounded_rectangle(
+            (x, y, x + area_w, y + area_h),
+            radius=6,
+            fill=(41, 92, 67),
+            outline=(207, 224, 184),
+            width=1,
+        )
         draw.text((x + 8, y + 6), label, fill=(241, 246, 232), font=self.font)
-        if action is None:
+        if prompt is not None:
+            self._draw_centered_text(
+                draw,
+                (x + 12, y + 24, x + area_w - 12, y + area_h - 6),
+                prompt,
+                fill=(241, 246, 232),
+                font=self.big_font,
+            )
+        elif action is None:
             draw.text((x + 42, y + 30), "-", fill=(214, 224, 207), font=self.big_font)
         elif action == "pass":
             draw.rounded_rectangle((x + 52, y + 28, x + 132, y + 52), radius=5, fill=(93, 105, 116), outline=(241, 246, 232), width=1)
