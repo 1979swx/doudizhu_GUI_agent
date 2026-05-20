@@ -46,6 +46,7 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
+    DOUDIZHU_GROUNDING_METRIC_NAMES,
     DOUDIZHU_REWARD_METRIC_NAMES,
     compute_data_metrics,
     compute_throughout_metrics,
@@ -694,6 +695,7 @@ class RayPPOTrainer:
         traj_uid_list = []
         success_rate_dict = {}
         doudizhu_reward_dict = {}
+        doudizhu_grounding_metric_dict = {}
 
         # Lists to collect samples for the table
         sample_inputs = []
@@ -789,6 +791,12 @@ class RayPPOTrainer:
                     doudizhu_reward_dict[k].append(test_batch.non_tensor_batch[k][0])
                     for i in range(1, len(test_batch.non_tensor_batch[k])):
                         assert test_batch.non_tensor_batch[k][0] == test_batch.non_tensor_batch[k][i], f'not all {k} are the same, 0: {test_batch.non_tensor_batch[k][0]}, {i}: {test_batch.non_tensor_batch[k][i]}'
+                if k in DOUDIZHU_GROUNDING_METRIC_NAMES:
+                    if k not in doudizhu_grounding_metric_dict:
+                        doudizhu_grounding_metric_dict[k] = []
+                    doudizhu_grounding_metric_dict[k].append(test_batch.non_tensor_batch[k][0])
+                    for i in range(1, len(test_batch.non_tensor_batch[k])):
+                        assert test_batch.non_tensor_batch[k][0] == test_batch.non_tensor_batch[k][i], f'not all {k} are the same, 0: {test_batch.non_tensor_batch[k][0]}, {i}: {test_batch.non_tensor_batch[k][i]}'
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
@@ -798,6 +806,7 @@ class RayPPOTrainer:
         traj_uids = np.concatenate(traj_uid_list, axis=0)
         success_rate = {k: np.mean(v) for k, v in success_rate_dict.items()}
         doudizhu_rewards = {k: np.mean(v) for k, v in doudizhu_reward_dict.items()}
+        doudizhu_grounding_metrics = {k: np.mean(v) for k, v in doudizhu_grounding_metric_dict.items()}
 
         # evaluate test_score based on data source
         data_source_reward = {}
@@ -833,6 +842,8 @@ class RayPPOTrainer:
             metric_dict[f'val/{k}'] = v
         for k, v in doudizhu_rewards.items():
             metric_dict[f'val/{DOUDIZHU_REWARD_METRIC_NAMES[k]}'] = v
+        for k, v in doudizhu_grounding_metrics.items():
+            metric_dict[f'val/{DOUDIZHU_GROUNDING_METRIC_NAMES[k]}'] = v
 
         return metric_dict
 

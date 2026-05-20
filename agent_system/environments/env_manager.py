@@ -711,6 +711,87 @@ class DoudizhuEnvironmentManager(EnvironmentManagerBase):
                 return
 
 
+class DoudizhuGroundingEnvironmentManager(EnvironmentManagerBase):
+    def __init__(self, envs, projection_f, config):
+        self.chinese_mode = self._is_chinese_mode(config)
+        self.prompt_template = (
+            DOUDIZHU_GROUNDING_TEMPLATE_ZH
+            if self.chinese_mode
+            else DOUDIZHU_GROUNDING_TEMPLATE
+        )
+        super().__init__(envs, projection_f, config)
+
+    def _is_chinese_mode(self, config) -> bool:
+        doudizhu_cfg = getattr(config.env, "doudizhu", None)
+        if doudizhu_cfg is None:
+            return False
+        if bool(getattr(doudizhu_cfg, "chinese_mode", False)):
+            return True
+        language = str(getattr(doudizhu_cfg, "language", "en")).lower()
+        return language in ("zh", "zh-cn", "chinese", "cn")
+
+    def reset(self, kwargs):
+        image_obs, infos = self.envs.reset(kwargs=kwargs)
+        observations = {
+            "text": self.build_text_obs(infos),
+            "image": image_obs,
+            "anchor": np.array([info.get("state_summary", {}) for info in infos], dtype=object),
+        }
+        return observations, infos
+
+    def step(self, text_actions: List[str]):
+        structured_actions, valids = self.projection_f(text_actions)
+        for i, action in enumerate(structured_actions):
+            action["projection_valid"] = int(valids[i])
+
+        image_obs, rewards, dones, infos = self.envs.step(structured_actions)
+
+        for i, info in enumerate(infos):
+            info["is_projection_valid"] = to_numpy(valids[i])
+
+        next_observations = {
+            "text": self.build_text_obs(infos),
+            "image": image_obs,
+            "anchor": np.array([info.get("state_summary", {}) for info in infos], dtype=object),
+        }
+        return next_observations, to_numpy(rewards), to_numpy(dones), infos
+
+    def build_text_obs(self, infos) -> List[str]:
+        prompts = []
+        for info in infos:
+            command = (
+                info.get("next_target_action_pretty")
+                or info.get("target_action_pretty")
+                or info.get("target_action")
+                or ("不要" if self.chinese_mode else "pass")
+            )
+            prompts.append(self.prompt_template.format(command=command))
+        return prompts
+
+    def _process_batch(self, batch_idx, total_batch_list, total_infos, success):
+        active_infos = [
+            total_infos[batch_idx][i]
+            for i, batch_item in enumerate(total_batch_list[batch_idx])
+            if batch_item["active_masks"]
+        ]
+        if not active_infos:
+            success["success_rate"].append(0.0)
+            return
+
+        target_matches = [float(info.get("target_action_match", 0.0)) for info in active_infos]
+        click_valids = [float(info.get("click_valid_ratio", 0.0)) for info in active_infos]
+        submit_corrects = [float(info.get("submit_correct", 0.0)) for info in active_infos]
+        projection_valids = [float(info.get("projection_valid", 0.0)) for info in active_infos]
+        rewards = [float(info.get("reward", 0.0)) for info in active_infos]
+
+        success["success_rate"].append(float(np.mean(target_matches)))
+        success["doudizhu_grounding_target_action_match"].append(float(np.mean(target_matches)))
+        success["doudizhu_grounding_click_valid_ratio"].append(float(np.mean(click_valids)))
+        success["doudizhu_grounding_submit_correct"].append(float(np.mean(submit_corrects)))
+        success["doudizhu_grounding_projection_valid"].append(float(np.mean(projection_valids)))
+        success["doudizhu_grounding_reward"].append(float(np.mean(rewards)))
+
+
 def make_envs(config):
     """
     Create enviroments 
@@ -729,6 +810,30 @@ def make_envs(config):
         projection_f = partial(search_projection)
         envs = SearchEnvironmentManager(_envs, projection_f, config)
         val_envs = SearchEnvironmentManager(_val_envs, projection_f, config)
+        return envs, val_envs
+    elif "doudizhu_grounding" in config.env.env_name.lower():
+        from agent_system.environments.env_package.doudizhu_grounding import build_doudizhu_grounding_envs, doudizhu_grounding_projection
+
+        _envs = build_doudizhu_grounding_envs(
+            seed=config.env.seed,
+            env_num=config.data.train_batch_size,
+            group_n=group_n,
+            is_train=True,
+            env_config=config.env,
+            resources_per_worker=resources_per_worker,
+        )
+        _val_envs = build_doudizhu_grounding_envs(
+            seed=config.env.seed + 1000,
+            env_num=config.data.val_batch_size,
+            group_n=1,
+            is_train=False,
+            env_config=config.env,
+            resources_per_worker=resources_per_worker,
+        )
+
+        projection_f = partial(doudizhu_grounding_projection, max_clicks=config.env.doudizhu.max_clicks)
+        envs = DoudizhuGroundingEnvironmentManager(_envs, projection_f, config)
+        val_envs = DoudizhuGroundingEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
     elif "doudizhu" in config.env.env_name.lower():
         from agent_system.environments.env_package.doudizhu import build_doudizhu_envs, doudizhu_projection

@@ -4,10 +4,12 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from agent_system.environments.env_manager import DoudizhuEnvironmentManager
+from agent_system.environments.env_manager import DoudizhuGroundingEnvironmentManager
 from agent_system.environments.env_package.doudizhu import build_doudizhu_envs, doudizhu_projection
 from agent_system.environments.env_package.doudizhu.core.base import Card
 from agent_system.environments.env_package.doudizhu.envs import DoudizhuSingleEnv
 from agent_system.environments.env_package.doudizhu.renderer import DoudizhuRenderer
+from agent_system.environments.env_package.doudizhu_grounding import build_doudizhu_grounding_envs, doudizhu_grounding_projection
 
 
 TOOL_CALL_RESPONSE = (
@@ -58,7 +60,44 @@ def _env_config(use_ray=False, language=None, chinese_mode=None):
         doudizhu_cfg["chinese_mode"] = chinese_mode
     return {
         "doudizhu": doudizhu_cfg,
+        "doudizhu_grounding": {
+            "use_ray": use_ray,
+            "teacher_policy": "rule_v1",
+            "reward": {
+                "projection_valid": 0.1,
+                "click_valid": 0.2,
+                "submit_correct": 0.2,
+                "target_action_match": 1.0,
+            },
+        },
     }
+
+
+def _norm_center(renderer, box):
+    x = (box[0] + box[2]) / 2.0
+    y = (box[1] + box[3]) / 2.0
+    return [x / float(renderer.width - 1) * 1000.0, y / float(renderer.height - 1) * 1000.0]
+
+
+def _oracle_clicks_for_target(env, target_action):
+    renderer = env.renderer
+    state = env.game.state
+    hitboxes = renderer.get_hitboxes(state)
+    if target_action == "pass":
+        pass_box = next(hitbox.box for hitbox in hitboxes if hitbox.kind == "pass")
+        return [_norm_center(renderer, pass_box)]
+
+    hand = state["current_hand"]
+    used = set()
+    clicks = []
+    for card in target_action:
+        idx = next(i for i, hand_card in enumerate(hand) if hand_card == card and i not in used)
+        used.add(idx)
+        card_box = next(hitbox.box for hitbox in hitboxes if hitbox.kind == "card" and hitbox.payload == idx)
+        clicks.append(_norm_center(renderer, card_box))
+    play_box = next(hitbox.box for hitbox in hitboxes if hitbox.kind == "play")
+    clicks.append(_norm_center(renderer, play_box))
+    return clicks
 
 
 def test_doudizhu_projection_valid_and_invalid_cases():
@@ -85,6 +124,21 @@ def test_doudizhu_projection_valid_and_invalid_cases():
     assert actions[0]["semantic_action"] == "3"
     assert actions[0]["tool_calling"] == 2
     assert actions[1]["clicks"] == []
+
+
+def test_doudizhu_grounding_projection_requires_plan_and_tool_call_only():
+    actions, valids = doudizhu_grounding_projection(
+        [
+            "<plan>click the 3 then play</plan><tool_call>left_click([55,870],[424,758])</tool_call>",
+            "<tool_call>left_click([55,870],[424,758])</tool_call>",
+            "<plan>p</plan><action>3</action><tool_call>left_click([55,870])</tool_call><chat>x</chat><memory>m</memory>",
+        ],
+        max_clicks=8,
+    )
+
+    assert valids == [1, 0, 1]
+    assert actions[0]["clicks"] == [[55.0, 870.0], [424.0, 758.0]]
+    assert actions[0]["plan"] == "click the 3 then play"
 
 
 def test_single_env_executes_gui_clicks_and_fallback():
@@ -344,4 +398,65 @@ def test_doudizhu_chinese_mode_uses_chinese_prompt_and_renderer_text_mode():
     assert local_env.renderer.text["play"] == "出牌"
     assert str(local_env.renderer.font.path).endswith("NotoSansCJKsc-Regular.otf")
     assert image_obs.shape == (480, 640, 3)
+    manager.close()
+
+
+def test_doudizhu_grounding_vector_shares_canonical_game_across_group():
+    env = build_doudizhu_grounding_envs(seed=7, env_num=1, group_n=2, is_train=True, env_config=_env_config(use_ray=False, language="zh"))
+    obs, infos = env.reset()
+    assert obs.shape == (2, 480, 640, 3)
+    assert infos[0]["target_action"] == infos[1]["target_action"]
+    assert infos[0]["grpo_uid"] == infos[1]["grpo_uid"]
+
+    local_env = env.workers[0].env
+    target_action = infos[0]["target_action"]
+    oracle_action = {
+        "clicks": _oracle_clicks_for_target(local_env, target_action),
+        "projection_valid": 1,
+        "plan": "oracle",
+    }
+    bad_action = {"clicks": [], "projection_valid": 0, "plan": ""}
+
+    next_obs, rewards, dones, step_infos = env.step([oracle_action, bad_action])
+    assert next_obs.shape == (2, 480, 640, 3)
+    assert rewards[0] > rewards[1]
+    assert step_infos[0]["target_action_match"] == 1.0
+    assert step_infos[1]["target_action_match"] == 0.0
+    assert step_infos[0]["grpo_uid"] == step_infos[1]["grpo_uid"]
+    assert local_env.grounding_step == 1
+    assert step_infos[0]["next_target_action_pretty"] == step_infos[1]["next_target_action_pretty"]
+    assert dones == [False, False]
+    env.close()
+
+
+def test_doudizhu_grounding_manager_uses_next_teacher_command_for_next_prompt():
+    envs = build_doudizhu_grounding_envs(seed=9, env_num=1, group_n=2, is_train=True, env_config=_env_config(use_ray=False, language="zh"))
+    config = OmegaConf.create(
+        {
+            "env": {
+                "doudizhu": {
+                    "language": "zh",
+                    "chinese_mode": True,
+                    "max_clicks": 8,
+                }
+            }
+        }
+    )
+    manager = DoudizhuGroundingEnvironmentManager(envs, partial(doudizhu_grounding_projection, max_clicks=8), config)
+    obs, infos = manager.reset(kwargs=None)
+    assert "指挥出牌" in obs["text"][0]
+    assert infos[0]["target_action_pretty"] in obs["text"][0]
+
+    local_env = envs.workers[0].env
+    target_action = infos[0]["target_action"]
+    clicks = _oracle_clicks_for_target(local_env, target_action)
+    response = "<plan>执行指挥动作。</plan><tool_call>left_click({})</tool_call>".format(
+        ",".join(f"[{x:.3f},{y:.3f}]" for x, y in clicks)
+    )
+
+    next_obs, rewards, dones, step_infos = manager.step([response, "<plan>空</plan><tool_call>left_click([1,1])</tool_call>"])
+    assert rewards[0] > rewards[1]
+    assert step_infos[0]["is_projection_valid"].item() == 1
+    assert step_infos[0]["next_target_action_pretty"] in next_obs["text"][0]
+    assert step_infos[0]["grpo_uid"] == step_infos[1]["grpo_uid"]
     manager.close()

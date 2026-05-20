@@ -20,3 +20,4 @@ from .gym_cards import *
 from .appworld import *
 from .search import *
 from .doudizhu import *
+from .doudizhu_grounding import *

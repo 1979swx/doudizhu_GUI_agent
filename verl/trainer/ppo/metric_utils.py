@@ -33,6 +33,12 @@ DOUDIZHU_REWARD_METRIC_NAMES = {
     "doudizhu_reward_win": "episode/reward/win",
 }
 
+DOUDIZHU_GROUNDING_METRIC_NAMES = {
+    "doudizhu_grounding_target_action_match": "episode/doudizhu_grounding/target_action_match",
+    "doudizhu_grounding_click_valid_ratio": "episode/doudizhu_grounding/click_valid_ratio",
+    "doudizhu_grounding_submit_correct": "episode/doudizhu_grounding/submit_correct",
+}
+
 @deprecated("verl.utils.metric.reduce_metrics")
 def reduce_metrics(metrics: Dict[str, List[Any]]) -> Dict[str, Any]:
     """
@@ -197,6 +203,13 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
             {
                 metric_name: batch.non_tensor_batch[key][0].item()
                 for key, metric_name in DOUDIZHU_REWARD_METRIC_NAMES.items()
+                if key in batch.non_tensor_batch
+            }
+        ),
+        **(
+            {
+                metric_name: batch.non_tensor_batch[key][0].item()
+                for key, metric_name in DOUDIZHU_GROUNDING_METRIC_NAMES.items()
                 if key in batch.non_tensor_batch
             }
         ),

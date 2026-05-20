@@ -376,6 +376,9 @@ class TrajectoryCollector:
             else:
                 batch.non_tensor_batch['is_projection_valid'] = np.ones(batch_size, dtype=bool)
 
+            if 'grpo_uid' in infos[0]:
+                batch.non_tensor_batch['uid'] = np.array([info['grpo_uid'] for info in infos], dtype=object)
+
             if 'tool_calling' in infos[0]:
                 tool_callings[active_masks] += np.array([info['tool_calling'] for info in infos], dtype=np.float32)[active_masks]
             # Create reward tensor, only assign rewards for active environments

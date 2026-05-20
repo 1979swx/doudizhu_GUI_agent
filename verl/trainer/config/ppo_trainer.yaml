@@ -321,7 +321,7 @@ env:
     chinese_mode: False
     image_width: 640
     image_height: 480
-    max_clicks: 12
+    max_clicks: 20
     max_memory_chars: 512
     max_bot_turns: 256
     bot_policy: rule_v1
@@ -332,3 +332,11 @@ env:
       hand_depletion: 0.2
       win: 20.0
       loss: 0.0
+  doudizhu_grounding:
+    use_ray: False
+    teacher_policy: rule_v1
+    reward:
+      projection_valid: 0.1
+      click_valid: 0.2
+      submit_correct: 0.2
+      target_action_match: 1.0

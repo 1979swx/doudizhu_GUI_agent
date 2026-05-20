@@ -13,7 +13,7 @@ from urllib.error import HTTPError, URLError
 # Usage
 # -----
 # This script starts a Gradio debugger for the Dou Dizhu GUI environment.
-# It has three pages:
+# It has four pages:
 #   1. Human play: manually click the observation image, then submit the clicks
 #      to the environment.
 #   2. Spectator mode: a VL model reads the screenshot and chooses the full
@@ -21,6 +21,9 @@ from urllib.error import HTTPError, URLError
 #   3. Commander mode: you type a semantic card action such as "3 3",
 #      "10 J Q K A", or "不要"; the model only converts that command into GUI
 #      clicks.
+#   4. Watch commander mode: a rule teacher chooses the semantic card action;
+#      the model converts that command into GUI clicks, while the game advances
+#      by the teacher action so you can watch grounding behavior.
 #
 # Basic local-model run:
 #   conda activate verl-agent-bw
@@ -81,6 +84,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 try:
     from agent_system.environments.env_package.doudizhu.envs import DoudizhuSingleEnv
+    from agent_system.environments.env_package.doudizhu_grounding.envs import DoudizhuGroundingSingleEnv
     from agent_system.environments.env_package.doudizhu.projection import doudizhu_projection, parse_left_click_tool_call
     from agent_system.environments.prompts.doudizhu import DOUDIZHU_VISUAL_TEMPLATE, DOUDIZHU_VISUAL_TEMPLATE_ZH
 except ImportError as e:
@@ -101,8 +105,8 @@ Your only job is to execute that commanded action on the screenshot. Do not choo
 - Otherwise, click each matching card in your bottom hand, then click the PLAY button.
 - Coordinates must be normalized numbers from 0 to 1000.
 
-Output exactly one XML tag named <tool_call>. Inside it, output exactly one left_click(...) call:
-<tool_call>left_click([x1,y1],[x2,y2])</tool_call>
+Return exactly two XML tags. In <plan>, briefly identify what you will click. In <tool_call>, output exactly one left_click(...) call:
+<plan>Briefly identify which visible card(s) or button you will click.</plan><tool_call>left_click([x1,y1],[x2,y2])</tool_call>
 """
 COMMAND_PROMPT_TEMPLATE_ZH = """
 你正在通过鼠标点击来控制斗地主 GUI。
@@ -173,6 +177,7 @@ def ui(en: str, zh: str) -> str:
 MODE_HUMAN = ui("Human play", "人工游玩")
 MODE_SPECTATOR = ui("Spectator mode", "旁观模式")
 MODE_COMMANDER = ui("Commander mode", "指挥模式")
+MODE_WATCH_COMMANDER = ui("Watch commander mode", "观看指挥模式")
 
 
 def switch_mode(mode):
@@ -180,6 +185,7 @@ def switch_mode(mode):
         gr.update(visible=mode == MODE_HUMAN),
         gr.update(visible=mode == MODE_SPECTATOR),
         gr.update(visible=mode == MODE_COMMANDER),
+        gr.update(visible=mode == MODE_WATCH_COMMANDER),
     )
 
 
@@ -196,6 +202,20 @@ env = DoudizhuSingleEnv(
         }
     },
 )
+watch_commander_env = DoudizhuGroundingSingleEnv(
+    seed=42,
+    env_config={
+        "doudizhu": {
+            "language": LANGUAGE,
+            "chinese_mode": CHINESE_MODE,
+        },
+        "doudizhu_grounding": {
+            "teacher_policy": "rule_v1",
+        },
+    },
+)
+watch_commander_obs = None
+watch_commander_done = False
 spectator_agent = None
 spectator_agent_key = None
 spectator_memory = INITIAL_MEMORY
@@ -1042,10 +1062,13 @@ def reset_commander(seed_value):
 
 
 def initialize_pages():
-    global spectator_memory, last_raw_response
+    global spectator_memory, last_raw_response, watch_commander_obs, watch_commander_done
     human_obs, human_status, clicks_json, human_memory = reset_env()
     spectator_memory = INITIAL_MEMORY
     last_raw_response = ""
+    watch_commander_done = False
+    watch_commander_obs, watch_info = watch_commander_env.reset(seed=int(np.random.randint(0, 100000)))
+    watch_command = watch_info.get("target_action_pretty") or watch_info.get("target_action") or ""
     spectator_status = ui(
         "Game initialized. Load the model if needed, then click Agent Step or Auto-play.",
         "游戏已初始化。如有需要请先加载模型，然后点击“Agent 单步”或“自动运行”。",
@@ -1053,6 +1076,12 @@ def initialize_pages():
     commander_status = ui(
         "Game initialized. Enter a semantic card command, then click Execute Command.",
         "游戏已初始化。输入语义出牌指令，然后点击“执行指令”。",
+    )
+    watch_commander_status = ui(
+        f"Game initialized. Rule command: {watch_command}\n"
+        "Load the model if needed, then click Model Step or Auto-watch.",
+        f"游戏已初始化。Rule 指挥动作：{watch_command}\n"
+        "如有需要请先加载模型，然后点击“模型单步”或“自动观看”。",
     )
     return (
         human_obs,
@@ -1067,6 +1096,10 @@ def initialize_pages():
         human_obs,
         human_obs,
         commander_status,
+        "{}",
+        watch_commander_obs,
+        watch_commander_obs,
+        watch_commander_status,
         "{}",
     )
 
@@ -1199,10 +1232,212 @@ def commander_step(model_backend, model_path, auto_merge, device_map, torch_dtyp
         return fallback_obs, fallback_obs, status, "{}"
 
 
-with gr.Blocks(title=ui("Doudizhu Human, Commander, and Spectator Debugger", "斗地主人工、指挥与旁观调试器"), theme=gr.themes.Soft()) as demo:
+def reset_watch_commander(seed_value):
+    global watch_commander_obs, watch_commander_done, last_raw_response
+    watch_commander_done = False
+    last_raw_response = ""
+    if seed_value is None or seed_value == "":
+        seed = int(np.random.randint(0, 100000))
+    else:
+        seed = int(seed_value)
+    watch_commander_obs, info = watch_commander_env.reset(seed=seed)
+    command = info.get("target_action_pretty") or info.get("target_action") or ""
+    status = ui(
+        f"Watch commander game reset with seed={seed}.\n"
+        f"Rule command: {command}\n"
+        "Click Model Step to let the model execute the rule command.",
+        f"观看指挥游戏已重置，seed={seed}。\n"
+        f"Rule 指挥动作：{command}\n"
+        "点击“模型单步”让模型执行 rule 指挥。",
+    )
+    return watch_commander_obs, watch_commander_obs, status, "{}"
+
+
+def _watch_commander_step_core(
+    model_backend,
+    model_path,
+    auto_merge,
+    device_map,
+    torch_dtype,
+    api_base_url,
+    api_model,
+    api_key_env,
+    api_timeout,
+    api_thinking,
+    max_new_tokens,
+    temperature,
+    top_p,
+    enable_thinking,
+):
+    global watch_commander_obs, watch_commander_done, last_raw_response
+    if watch_commander_obs is None:
+        watch_commander_obs, _info = watch_commander_env.reset(seed=int(np.random.randint(0, 100000)))
+        watch_commander_done = False
+    if watch_commander_done or watch_commander_env.done:
+        watch_commander_done = True
+        return (
+            watch_commander_obs,
+            watch_commander_obs,
+            ui("Game over. Reset watch commander game to continue.", "游戏已结束。请重置观看指挥游戏后继续。"),
+            "{}",
+        )
+
+    obs_before = watch_commander_obs.copy()
+    target_action = watch_commander_env.target_action
+    command = watch_commander_env._pretty_action(target_action)
+    agent = _load_spectator_agent(
+        model_backend,
+        model_path,
+        bool(auto_merge),
+        device_map,
+        torch_dtype,
+        api_base_url,
+        api_model,
+        api_key_env,
+        api_timeout,
+        api_thinking,
+    )
+    response, action = agent.generate_commanded_action(
+        obs_before,
+        command,
+        max_new_tokens=int(max_new_tokens),
+        temperature=float(temperature),
+        top_p=float(top_p),
+        enable_thinking=bool(enable_thinking),
+    )
+    last_raw_response = response
+    overlay = annotate_clicks(obs_before, action.get("clicks", []))
+
+    rewards, _dones, infos = watch_commander_env.score_group([action])
+    reward = float(rewards[0])
+    info = infos[0]
+    next_obs, next_info = watch_commander_env.advance_teacher()
+    watch_commander_obs = next_obs
+    watch_commander_done = bool(watch_commander_env.done)
+    next_command = next_info.get("target_action_pretty") or next_info.get("target_action") or ""
+
+    matched = bool(info.get("target_action_match", 0.0))
+    result = ui("Matched rule command", "已匹配 rule 指挥") if matched else ui("Did not match rule command", "未匹配 rule 指挥")
+    status = ui(
+        f"Rule command: {command}\n"
+        f"Model parsed action: {watch_commander_env._pretty_action(info.get('predicted_action'))}\n"
+        f"Reward: {reward:.3f} | Projection valid: {action.get('projection_valid', 0)} | "
+        f"Click valid ratio: {info.get('click_valid_ratio', 0.0):.2f} | "
+        f"Submit correct: {info.get('submit_correct', 0.0):.0f} | {result}\n"
+        f"Selected cards: {watch_commander_env._pretty_action(info.get('selected_cards')) or '-'} | Submit kind: {info.get('submit_kind')}\n"
+        f"Teacher advanced the game with: {command}\n"
+        f"Next rule command: {next_command or '-'}\n\n"
+        f"Click positions:\n{_format_clicks(action.get('clicks', []), obs_before)}",
+        f"Rule 指挥动作：{command}\n"
+        f"模型解析动作：{watch_commander_env._pretty_action(info.get('predicted_action'))}\n"
+        f"奖励：{reward:.3f} | 标签解析有效：{action.get('projection_valid', 0)} | "
+        f"有效点击比例：{info.get('click_valid_ratio', 0.0):.2f} | "
+        f"提交正确：{info.get('submit_correct', 0.0):.0f} | {result}\n"
+        f"选中的牌：{watch_commander_env._pretty_action(info.get('selected_cards')) or '-'} | 提交类型：{info.get('submit_kind')}\n"
+        f"底层牌局已按 teacher 动作推进：{command}\n"
+        f"下一条 rule 指挥：{next_command or '-'}\n\n"
+        f"点击位置：\n{_format_clicks(action.get('clicks', []), obs_before)}",
+    )
+    if watch_commander_done:
+        won = bool(next_info.get("won", 0))
+        status += ui(
+            f"\n\nGame over after teacher advance. {'Player 0 won.' if won else 'Player 0 lost.'}",
+            f"\n\nTeacher 推进后游戏结束。玩家 0 {'赢了。' if won else '输了。'}",
+        )
+
+    action_json = json.dumps(
+        {
+            "rule_command": command,
+            "model_predicted_action": watch_commander_env._pretty_action(info.get("predicted_action")),
+            "target_action_match": info.get("target_action_match", 0.0),
+            "click_valid_ratio": info.get("click_valid_ratio", 0.0),
+            "submit_correct": info.get("submit_correct", 0.0),
+            "clicks": action.get("clicks", []),
+            "projection_valid": action.get("projection_valid", 0),
+            "raw_tool_call_text": action.get("raw_tool_call_text", ""),
+            "raw_response": response,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    return watch_commander_obs, overlay, status, action_json
+
+
+def watch_commander_step(model_backend, model_path, auto_merge, device_map, torch_dtype, api_base_url, api_model, api_key_env, api_timeout, api_thinking, max_new_tokens, temperature, top_p, enable_thinking):
+    try:
+        return _watch_commander_step_core(
+            model_backend,
+            model_path,
+            auto_merge,
+            device_map,
+            torch_dtype,
+            api_base_url,
+            api_model,
+            api_key_env,
+            api_timeout,
+            api_thinking,
+            max_new_tokens,
+            temperature,
+            top_p,
+            enable_thinking,
+        )
+    except Exception as exc:
+        status = ui(
+            f"Watch commander step failed:\n{type(exc).__name__}: {exc}",
+            f"观看指挥单步失败：\n{type(exc).__name__}: {exc}",
+        )
+        fallback_obs = watch_commander_obs if watch_commander_obs is not None else np.zeros((480, 640, 3), dtype=np.uint8)
+        return fallback_obs, fallback_obs, status, "{}"
+
+
+def watch_commander_auto_play(
+    model_backend,
+    model_path,
+    auto_merge,
+    device_map,
+    torch_dtype,
+    api_base_url,
+    api_model,
+    api_key_env,
+    api_timeout,
+    api_thinking,
+    max_new_tokens,
+    temperature,
+    top_p,
+    enable_thinking,
+    steps,
+    delay_seconds,
+):
+    total_steps = max(1, int(steps))
+    delay = max(0.0, float(delay_seconds))
+    for _idx in range(total_steps):
+        outputs = watch_commander_step(
+            model_backend,
+            model_path,
+            auto_merge,
+            device_map,
+            torch_dtype,
+            api_base_url,
+            api_model,
+            api_key_env,
+            api_timeout,
+            api_thinking,
+            max_new_tokens,
+            temperature,
+            top_p,
+            enable_thinking,
+        )
+        yield outputs
+        if watch_commander_done:
+            break
+        if delay > 0:
+            time.sleep(delay)
+
+
+with gr.Blocks(title=ui("Doudizhu Human, Commander, Watch, and Spectator Debugger", "斗地主人工、指挥、观看与旁观调试器"), theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 斗地主 (Dou Dizhu) Agentic Environment")
     mode_selector = gr.Radio(
-        [MODE_HUMAN, MODE_SPECTATOR, MODE_COMMANDER],
+        [MODE_HUMAN, MODE_SPECTATOR, MODE_COMMANDER, MODE_WATCH_COMMANDER],
         value=MODE_HUMAN,
         label=ui("Page", "页面"),
     )
@@ -1318,10 +1553,54 @@ with gr.Blocks(title=ui("Doudizhu Human, Commander, and Spectator Debugger", "�
                 commander_status = gr.Textbox(label=ui("Commander Status", "指挥状态"), lines=12)
                 commander_action_json = gr.Textbox(label=ui("Projected tool_call / Raw Response", "投影 tool_call / 原始响应"), lines=12, interactive=False)
 
+    with gr.Group(visible=False) as watch_commander_page:
+        gr.Markdown(
+            ui(
+                "Watch the grounding task: a rule teacher commands the card action, the model only clicks, and the game advances by the teacher action.",
+                "观看 grounding 任务：rule teacher 负责指挥出牌，模型只负责点击，底层牌局始终按 teacher 动作推进。",
+            )
+        )
+        with gr.Row():
+            with gr.Column(scale=2):
+                watch_commander_img = gr.Image(interactive=False, label=ui("Current Observation After Teacher Advance", "Teacher 推进后的当前观察"))
+                watch_commander_overlay = gr.Image(interactive=False, label=ui("Last Model Click Overlay", "上一轮模型点击标注"))
+            with gr.Column(scale=1):
+                watch_model_backend_in = gr.Dropdown(["local", "api"], label=ui("Model Backend", "模型后端"), value=ARGS.model_backend)
+                watch_model_path_in = gr.Textbox(label=ui("Model / Checkpoint Path", "模型 / checkpoint 路径"), value=ARGS.model_path)
+                watch_auto_merge_in = gr.Checkbox(label=ui("Auto-merge verl FSDP checkpoint if needed", "需要时自动合并 verl FSDP checkpoint"), value=not ARGS.no_auto_merge)
+                with gr.Row():
+                    watch_device_map_in = gr.Textbox(label="device_map", value=ARGS.device_map)
+                    watch_dtype_in = gr.Dropdown(["auto", "float16", "bfloat16", "float32"], label="torch_dtype", value=ARGS.torch_dtype)
+                watch_api_base_url_in = gr.Textbox(label=ui("API Base URL (OpenAI-compatible)", "API Base URL（OpenAI 兼容）"), value=ARGS.api_base_url)
+                watch_api_model_in = gr.Textbox(label=ui("API Model", "API 模型"), value=ARGS.api_model)
+                with gr.Row():
+                    watch_api_key_env_in = gr.Textbox(label=ui("API Key Env", "API Key 环境变量"), value=ARGS.api_key_env)
+                    watch_api_timeout_in = gr.Number(label=ui("API Timeout", "API 超时"), value=ARGS.api_timeout)
+                    watch_api_thinking_in = gr.Dropdown(["default", "enabled", "disabled"], label="API thinking", value=ARGS.api_thinking)
+                with gr.Row():
+                    watch_max_tokens_in = gr.Number(label="max_new_tokens", value=min(512, ARGS.max_new_tokens), precision=0)
+                    watch_temp_in = gr.Number(label="temperature", value=ARGS.temperature)
+                    watch_top_p_in = gr.Number(label="top_p", value=ARGS.top_p)
+                watch_enable_thinking_in = gr.Checkbox(
+                    label="enable_thinking",
+                    value=bool(ARGS.enable_thinking),
+                )
+                watch_seed_in = gr.Number(label=ui("Reset Seed (blank = random)", "重置 Seed（留空为随机）"), value=None, precision=0)
+                with gr.Row():
+                    watch_load_model_btn = gr.Button(ui("Load Model", "加载模型"))
+                    watch_reset_btn = gr.Button(ui("Reset Watch Game", "重置观看游戏"))
+                with gr.Row():
+                    watch_step_btn = gr.Button(ui("Model Step", "模型单步"), variant="primary")
+                    watch_auto_steps_in = gr.Number(label=ui("Auto steps", "自动步数"), value=10, precision=0)
+                    watch_delay_in = gr.Number(label=ui("Delay seconds", "延迟秒数"), value=0.8)
+                watch_auto_btn = gr.Button(ui("Auto-watch", "自动观看"))
+                watch_status = gr.Textbox(label=ui("Watch Commander Status", "观看指挥状态"), lines=14)
+                watch_action_json = gr.Textbox(label=ui("Grounding Action / Raw Response", "Grounding 动作 / 原始响应"), lines=12, interactive=False)
+
     mode_selector.change(
         switch_mode,
         inputs=[mode_selector],
-        outputs=[human_page, spectator_page, commander_page],
+        outputs=[human_page, spectator_page, commander_page, watch_commander_page],
     )
 
     img.select(handle_click, outputs=[status_out, clicks_out])
@@ -1344,6 +1623,10 @@ with gr.Blocks(title=ui("Doudizhu Human, Commander, and Spectator Debugger", "�
             commander_overlay,
             commander_status,
             commander_action_json,
+            watch_commander_img,
+            watch_commander_overlay,
+            watch_status,
+            watch_action_json,
         ],
     )
 
@@ -1426,6 +1709,70 @@ with gr.Blocks(title=ui("Doudizhu Human, Commander, and Spectator Debugger", "�
             commander_command_in,
         ],
         outputs=[commander_img, commander_overlay, commander_status, commander_action_json],
+    )
+
+    watch_reset_btn.click(
+        reset_watch_commander,
+        inputs=[watch_seed_in],
+        outputs=[watch_commander_img, watch_commander_overlay, watch_status, watch_action_json],
+    )
+    watch_load_model_btn.click(
+        load_spectator_model,
+        inputs=[
+            watch_model_backend_in,
+            watch_model_path_in,
+            watch_auto_merge_in,
+            watch_device_map_in,
+            watch_dtype_in,
+            watch_api_base_url_in,
+            watch_api_model_in,
+            watch_api_key_env_in,
+            watch_api_timeout_in,
+            watch_api_thinking_in,
+        ],
+        outputs=[watch_status],
+    )
+    watch_step_btn.click(
+        watch_commander_step,
+        inputs=[
+            watch_model_backend_in,
+            watch_model_path_in,
+            watch_auto_merge_in,
+            watch_device_map_in,
+            watch_dtype_in,
+            watch_api_base_url_in,
+            watch_api_model_in,
+            watch_api_key_env_in,
+            watch_api_timeout_in,
+            watch_api_thinking_in,
+            watch_max_tokens_in,
+            watch_temp_in,
+            watch_top_p_in,
+            watch_enable_thinking_in,
+        ],
+        outputs=[watch_commander_img, watch_commander_overlay, watch_status, watch_action_json],
+    )
+    watch_auto_btn.click(
+        watch_commander_auto_play,
+        inputs=[
+            watch_model_backend_in,
+            watch_model_path_in,
+            watch_auto_merge_in,
+            watch_device_map_in,
+            watch_dtype_in,
+            watch_api_base_url_in,
+            watch_api_model_in,
+            watch_api_key_env_in,
+            watch_api_timeout_in,
+            watch_api_thinking_in,
+            watch_max_tokens_in,
+            watch_temp_in,
+            watch_top_p_in,
+            watch_enable_thinking_in,
+            watch_auto_steps_in,
+            watch_delay_in,
+        ],
+        outputs=[watch_commander_img, watch_commander_overlay, watch_status, watch_action_json],
     )
 
 if __name__ == "__main__":
