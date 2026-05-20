@@ -1,12 +1,10 @@
-import ast
-import json
 import re
 from typing import Any, Dict, List, Tuple
 
 
-LEGACY_TAG_NAMES = ("plan", "action", "chat", "memory")
 TOOL_CALL_TAG_NAMES = ("plan", "action", "tool_call", "chat", "memory")
-CLICK_ACTIONS = {"left_click", "click"}
+TOOL_CALL_PATTERN = re.compile(r"^\s*left_click\((?P<args>.*)\)\s*$", flags=re.DOTALL)
+COORDINATE_PATTERN = re.compile(r"\[\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*\]")
 
 
 def extract_tag(text: str, tag: str):
@@ -33,16 +31,6 @@ def _empty_action(raw_text: Any = "") -> Dict[str, Any]:
     }
 
 
-def _load_literal(text: str):
-    try:
-        return json.loads(text)
-    except Exception:
-        try:
-            return ast.literal_eval(text)
-        except Exception:
-            return None
-
-
 def _parse_coordinate_pair(coordinate) -> Tuple[List[float], bool]:
     if not isinstance(coordinate, (list, tuple)) or len(coordinate) != 2:
         return [], False
@@ -54,74 +42,59 @@ def _parse_coordinate_pair(coordinate) -> Tuple[List[float], bool]:
     return [float(x), float(y)], True
 
 
-def _parse_clicks(action_text: str, max_clicks: int) -> Tuple[List[List[float]], bool]:
-    parsed = _load_literal(action_text)
-    if parsed is None:
-        return [], False
-
-    if not isinstance(parsed, (list, tuple)):
-        return [], False
-    if len(parsed) == 0 or len(parsed) > max_clicks:
+def _parse_left_click_args(args_text: str, max_clicks: int) -> Tuple[List[List[float]], bool]:
+    args_text = args_text.strip()
+    if not args_text:
         return [], False
 
     clicks = []
-    for item in parsed:
-        click, valid = _parse_coordinate_pair(item)
-        if not valid:
+    pos = 0
+    while pos < len(args_text):
+        match = COORDINATE_PATTERN.match(args_text, pos)
+        if match is None:
+            return [], False
+        click, coordinate_valid = _parse_coordinate_pair([float(match.group(1)), float(match.group(2))])
+        if not coordinate_valid:
             return [], False
         clicks.append(click)
-    return clicks, True
+        if len(clicks) > max_clicks:
+            return [], False
+
+        pos = match.end()
+        while pos < len(args_text) and args_text[pos].isspace():
+            pos += 1
+        if pos == len(args_text):
+            break
+        if args_text[pos] != ",":
+            return [], False
+        pos += 1
+        while pos < len(args_text) and args_text[pos].isspace():
+            pos += 1
+        if pos == len(args_text):
+            return [], False
+
+    return clicks, bool(clicks)
 
 
-def _normalize_tool_calls(parsed):
-    if isinstance(parsed, dict) and isinstance(parsed.get("tool_calls"), list):
-        return parsed["tool_calls"]
-    if isinstance(parsed, dict):
-        return [parsed]
-    if isinstance(parsed, list):
-        return parsed
-    return []
-
-
-def _tool_call_payload(call):
-    if not isinstance(call, dict):
-        return None, None
-
-    if isinstance(call.get("function"), dict):
-        function = call["function"]
-        return function.get("name"), function.get("arguments", {})
-
-    return call.get("name"), call.get("arguments", {})
-
-
-def _parse_tool_calls(tool_call_text: str, max_clicks: int) -> Tuple[List[List[float]], List[Dict[str, Any]], bool]:
-    parsed = _load_literal(tool_call_text)
-    calls = _normalize_tool_calls(parsed)
-    if len(calls) == 0 or len(calls) > max_clicks:
+def parse_left_click_tool_call(tool_call_text: str, max_clicks: int) -> Tuple[List[List[float]], List[Dict[str, Any]], bool]:
+    match = TOOL_CALL_PATTERN.match(tool_call_text)
+    if match is None:
         return [], [], False
 
-    clicks = []
-    normalized_calls = []
-    for call in calls:
-        name, arguments = _tool_call_payload(call)
-        if isinstance(arguments, str):
-            arguments = _load_literal(arguments)
-        if name != "computer_use" or not isinstance(arguments, dict):
-            return [], [], False
-        if arguments.get("action") not in CLICK_ACTIONS:
-            return [], [], False
-        click, coordinate_valid = _parse_coordinate_pair(arguments.get("coordinate"))
-        if not coordinate_valid:
-            return [], [], False
-        normalized_call = {
+    clicks, valid = _parse_left_click_args(match.group("args"), max_clicks=max_clicks)
+    if not valid:
+        return [], [], False
+
+    normalized_calls = [
+        {
             "name": "computer_use",
             "arguments": {
                 "action": "left_click",
                 "coordinate": click,
             },
         }
-        clicks.append(click)
-        normalized_calls.append(normalized_call)
+        for click in clicks
+    ]
 
     return clicks, normalized_calls, True
 
@@ -140,17 +113,10 @@ def doudizhu_projection(text_actions: List[str], max_clicks: int = 12):
         has_tool_call_format = all(extracted[tag] is not None and extracted[tag] != "" for tag in TOOL_CALL_TAG_NAMES)
 
         if has_tool_call_format:
-            clicks, tool_calls, action_valid = _parse_tool_calls(extracted["tool_call"] or "", max_clicks=max_clicks)
-            valid = bool(action_valid)
+            clicks, tool_calls, action_valid = parse_left_click_tool_call(extracted["tool_call"] or "", max_clicks=max_clicks)
         else:
-            extracted = {tag: extract_tag(response, tag) for tag in LEGACY_TAG_NAMES}
-            has_legacy_format = all(extracted[tag] is not None and extracted[tag] != "" for tag in LEGACY_TAG_NAMES)
-            clicks, action_valid = _parse_clicks(extracted["action"] or "", max_clicks=max_clicks)
-            tool_calls = [
-                {"name": "computer_use", "arguments": {"action": "left_click", "coordinate": click}}
-                for click in clicks
-            ] if action_valid else []
-            valid = bool(has_legacy_format and action_valid)
+            clicks, tool_calls, action_valid = [], [], False
+        valid = bool(action_valid)
 
         action = {
             "clicks": clicks if action_valid else [],

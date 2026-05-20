@@ -10,8 +10,15 @@ from agent_system.environments.env_package.doudizhu.envs import DoudizhuSingleEn
 from agent_system.environments.env_package.doudizhu.renderer import DoudizhuRenderer
 
 
-VALID_RESPONSE = "<plan>plan</plan><action>[[55, 870], [424, 758]]</action><chat>Let's press them.</chat><memory>I led with a low card.</memory>"
 TOOL_CALL_RESPONSE = (
+    "<plan>plan</plan>"
+    "<action>3</action>"
+    "<tool_call>left_click([55,870],[424,758])</tool_call>"
+    "<chat>Let's press them.</chat>"
+    "<memory>I led with a low card.</memory>"
+)
+LEGACY_ACTION_RESPONSE = "<plan>plan</plan><action>[[55, 870], [424, 758]]</action><chat>Let's press them.</chat><memory>I led with a low card.</memory>"
+LEGACY_JSON_TOOL_CALL_RESPONSE = (
     "<plan>plan</plan>"
     "<action>3</action>"
     '<tool_call>[{"name":"computer_use","arguments":{"action":"left_click","coordinate":[55,870]}},'
@@ -22,8 +29,7 @@ TOOL_CALL_RESPONSE = (
 MEMORY_WITH_IMAGE_TOKENS_RESPONSE = (
     "<plan>plan</plan>"
     "<action>3</action>"
-    '<tool_call>[{"name":"computer_use","arguments":{"action":"left_click","coordinate":[55,870]}},'
-    '{"name":"computer_use","arguments":{"action":"left_click","coordinate":[424,758]}}]</tool_call>'
+    "<tool_call>left_click([55,870],[424,758])</tool_call>"
     "<chat>Let's press them.</chat>"
     "<memory>I saw <image> and <|vision_start|><|image_pad|><|vision_end|> in the prompt.</memory>"
 )
@@ -58,10 +64,11 @@ def _env_config(use_ray=False, language=None, chinese_mode=None):
 def test_doudizhu_projection_valid_and_invalid_cases():
     actions, valids = doudizhu_projection(
         [
-            VALID_RESPONSE,
             TOOL_CALL_RESPONSE,
-            "<plan>plan</plan><action>[[-1, 100]]</action><chat>hi</chat><memory>m</memory>",
-            "<plan>plan</plan><action>not-json</action><chat>hi</chat><memory>m</memory>",
+            LEGACY_ACTION_RESPONSE,
+            LEGACY_JSON_TOOL_CALL_RESPONSE,
+            "<plan>plan</plan><action>3</action><tool_call>left_click([-1,100])</tool_call><chat>hi</chat><memory>m</memory>",
+            "<plan>plan</plan><action>3</action><tool_call>not-json</tool_call><chat>hi</chat><memory>m</memory>",
             "<plan>plan</plan><action>[[100, 100]]</action><memory>m</memory>",
             (
                 "<plan>plan</plan><action>3</action>"
@@ -72,13 +79,12 @@ def test_doudizhu_projection_valid_and_invalid_cases():
         max_clicks=8,
     )
 
-    assert valids == [1, 1, 0, 0, 0, 0]
+    assert valids == [1, 0, 0, 0, 0, 0, 0]
     assert actions[0]["clicks"] == [[55.0, 870.0], [424.0, 758.0]]
     assert actions[0]["chat"] == "Let's press them."
-    assert actions[1]["clicks"] == [[55.0, 870.0], [424.0, 758.0]]
-    assert actions[1]["semantic_action"] == "3"
-    assert actions[1]["tool_calling"] == 2
-    assert actions[2]["clicks"] == []
+    assert actions[0]["semantic_action"] == "3"
+    assert actions[0]["tool_calling"] == 2
+    assert actions[1]["clicks"] == []
 
 
 def test_single_env_executes_gui_clicks_and_fallback():

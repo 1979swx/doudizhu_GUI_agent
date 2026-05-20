@@ -25,13 +25,13 @@ Output one turn only. The tool calls must execute the full turn in order, and th
 If there is a conflict between your memory and the current game screenshot, the game screenshot shall always prevail.
 
 # Required Output Format
-You should first plan step-by-step about the visible cards, missing key cards, and your game strategy etc. Next, describe the semantic card action in natural card notation inside <action>, such as "3", "3 3 3", "10 J Q K A", "BJ RJ", or "pass". Then, output GUI clicks as a JSON list of computer_use tool calls inside <tool_call>. Each tool call must be {{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[x,y]}}}} where x and y are normalized screen coordinates in range [0, 1000]. Finally, output your chat message content and a compact note for next turn.
+You should first plan step-by-step about the visible cards, missing key cards, and your game strategy etc. Next, describe the semantic card action in natural card notation inside <action>, such as "3", "3 3 3", "10 J Q K A", "BJ RJ", or "pass". Then, output GUI clicks as one left_click(...) call inside <tool_call>, such as left_click([x1,y1],[x2,y2],[x3,y3]), where x and y are normalized screen coordinates in range [0, 1000]. Finally, output your chat message content and a compact note for next turn.
 You must enclose these with EXACTLY FIVE XML-style tags: <plan>, <action>, <tool_call>, <chat>, <memory>. Each tag must be present and non-empty.
 
 Example Output:
 <plan>Your reasoning process.</plan>
 <action>3 3 3</action>
-<tool_call>[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[140,850]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[210,850]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[280,850]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[500,735]}}}}]</tool_call>
+<tool_call>left_click([140,850],[210,850],[280,850],[500,735])</tool_call>
 <chat>One natural chat message to human players.</chat>
 <memory>Compact note for next turn.</memory>
 """
@@ -56,7 +56,7 @@ Read the bottom hand, current trick card areas, bottom-card display, and opponen
 
 # GUI Action Rules
 Coordinates are normalized integers from 0 to 1000. Select cards by clicking them in the bottom row, then click PLAY centered above your hand. To pass, click PASS next to PLAY above your hand.
-The action tag is only the semantic card action, for example "3 3 3" or "pass". The tool_call tag is a JSON list of computer_use left_click calls, one for each click in execution order.
+The action tag is only the semantic card action, for example "3 3 3" or "pass". The tool_call tag is exactly one left_click(...) call containing one coordinate pair for each click in execution order.
 
 # Previous Memory
 {previous_memory}
@@ -65,11 +65,11 @@ The action tag is only the semantic card action, for example "3 3 3" or "pass". 
 You must output all five tags exactly once:
 <plan>Short tactical reasoning based on the screenshot.</plan>
 <action>Semantic card action only.</action>
-<tool_call>JSON list of computer_use left_click calls only.</tool_call>
+<tool_call>left_click([x1,y1],[x2,y2])</tool_call>
 <chat>Short companion chat; no long explanation.</chat>
 <memory>Short persistent memory for the next prompt.</memory>
 
-Never put coordinates, prose, or code fences inside <action>. Put only the cards to play or "pass". Never put prose or code fences inside <tool_call>; put only valid JSON with coordinates in [0, 1000].
+Never put coordinates, prose, or code fences inside <action>. Put only the cards to play or "pass". Never put prose or code fences inside <tool_call>; put only one strict left_click([x,y],...) call with coordinates in [0, 1000].
 """
 
 
@@ -93,11 +93,11 @@ Play to win, but keep the chat brief and friendly. Consider what the opponents j
 Use this exact five-tag structure with no extra text:
 <plan>Observe the screen and choose the move.</plan>
 <action>3 3</action>
-<tool_call>[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[220,850]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[500,735]}}}}]</tool_call>
+<tool_call>left_click([220,850],[500,735])</tool_call>
 <chat>A short table-talk sentence.</chat>
 <memory>A concise update for next turn.</memory>
 
-The <action> tag must contain only the semantic card action. The <tool_call> tag must contain only a non-empty JSON list of computer_use left_click calls. Invalid JSON, missing tags, empty tags, out-of-range coordinates, or blank-area clicks reduce reward.
+The <action> tag must contain only the semantic card action. The <tool_call> tag must contain only one non-empty left_click([x,y],...) call. Invalid syntax, missing tags, empty tags, out-of-range coordinates, or blank-area clicks reduce reward.
 """
 
 
@@ -130,11 +130,11 @@ DOUDIZHU_VISUAL_TEMPLATE_ZH = """
 
 输出格式
 使用五个 XML 标签 <plan>, <action>, <tool_call>, <chat>, <memory> 来包裹以下内容。
-在 <plan> 中读取游戏截图获取当前牌面信息，并简要分析本轮出牌；在 <action> 中用文本输出本轮出牌动作，例如“3”、“10 J Q K A”、“BJ RJ”或“不要”；在 <tool_call> 中输出 GUI 点击，格式是 computer_use 工具调用 JSON 列表，每个点击为 {{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[x,y]}}}}，x 和 y 必须是 0 到 1000 范围内的归一化坐标，若要点击N个位置则列表中包含N个工具调用；在 <chat> 中输出对其它玩家说的聊天内容；在 <memory> 中为下回合生成一份非常简短的自然语言记忆，包括对手可能持有的危险牌型、未来战术规划等。
+在 <plan> 中读取游戏截图获取当前牌面信息，并简要分析本轮出牌；在 <action> 中用文本输出本轮出牌动作，例如“3”、“10 J Q K A”、“BJ RJ”或“不要”；在 <tool_call> 中输出 GUI 点击，格式是一个 left_click([x1,y1],[x2,y2],...) 调用，x 和 y 必须是 0 到 1000 范围内的归一化坐标，若要点击N个位置则调用中包含N个坐标对；在 <chat> 中输出对其它玩家说的聊天内容；在 <memory> 中为下回合生成一份非常简短的自然语言记忆，包括对手可能持有的危险牌型、未来战术规划等。
 每个标签都必须存在且不能为空。不添加任何其它额外 XML 标签。
 
 示例
-<plan>推理过程</plan><action>3 3</action><tool_call>[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[55,850]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[100,860]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[430,755]}}}}]</tool_call><chat>聊天内容</chat><memory>为下一回合准备的简短记忆</memory>
+<plan>推理过程</plan><action>3 3</action><tool_call>left_click([55,850],[100,860],[430,755])</tool_call><chat>聊天内容</chat><memory>为下一回合准备的简短记忆</memory>
 """
 
 

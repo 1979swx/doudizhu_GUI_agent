@@ -1,5 +1,4 @@
 import argparse
-import ast
 import base64
 import io
 import json
@@ -60,7 +59,7 @@ from urllib.error import HTTPError, URLError
 # API backend notes:
 #   The API backend sends the current screenshot as a PNG data URL in an
 #   OpenAI-compatible chat/completions request. The API response must still
-#   follow this script's XML/JSON prompt format, because the existing
+#   follow this script's XML prompt format, because the existing
 #   doudizhu_projection and command parser are reused. There is intentionally
 #   no format-repair or retry layer; invalid model output is surfaced directly
 #   in the UI. The default temperature is 1.0.
@@ -82,7 +81,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 try:
     from agent_system.environments.env_package.doudizhu.envs import DoudizhuSingleEnv
-    from agent_system.environments.env_package.doudizhu.projection import doudizhu_projection
+    from agent_system.environments.env_package.doudizhu.projection import doudizhu_projection, parse_left_click_tool_call
     from agent_system.environments.prompts.doudizhu import DOUDIZHU_VISUAL_TEMPLATE, DOUDIZHU_VISUAL_TEMPLATE_ZH
 except ImportError as e:
     print(f"Failed to import DoudizhuSingleEnv: {e}")
@@ -102,8 +101,8 @@ Your only job is to execute that commanded action on the screenshot. Do not choo
 - Otherwise, click each matching card in your bottom hand, then click the PLAY button.
 - Coordinates must be normalized numbers from 0 to 1000.
 
-Output exactly one XML tag named <tool_use>. Inside it, output a JSON list of computer_use calls:
-<tool_use>[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[x,y]}}}}]</tool_use>
+Output exactly one XML tag named <tool_call>. Inside it, output exactly one left_click(...) call:
+<tool_call>left_click([x1,y1],[x2,y2])</tool_call>
 """
 COMMAND_PROMPT_TEMPLATE_ZH = """
 你正在通过鼠标点击来控制斗地主 GUI。
@@ -117,19 +116,17 @@ COMMAND_PROMPT_TEMPLATE_ZH = """
 - 如果指挥动作是出牌，则依次点击底部手牌中与指挥动作匹配的每张牌，然后点击“出牌”按钮。
 - 也就是说，每一轮动作的最后必须以点击“出牌”或“不要”两个按钮之一结尾。
 
-输出 computer_use 工具调用的 JSON 列表，列表中的每一个元素代表一次点击。
+输出一个 left_click([x1,y1],[x2,y2],...,[xN,yN]) 调用，每个坐标对代表一次点击，N个坐标对代表N次点击。
 
-工具调用例子：
+在一个名为 <plan> </plan> 的 XML 标签包裹中规划你的行动，然后将确切行动输出为一个名为 <tool_call> </tool_call> 的 XML 标签包裹中。
+例子：
 指挥动作：不要
-[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[566,764]}}}}]
-
-指挥动作：K
-[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[804,848]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[422,751]}}}}]
+输出：<plan>指挥动作是不要，只点击“不要”按钮完成本轮。</plan><tool_call>left_click([566,764])</tool_call>
 
 指挥动作：3 3
-[{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[55,850]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[100,860]}}}},{{"name":"computer_use","arguments":{{"action":"left_click","coordinate":[430,755]}}}}]
+输出：<plan>指挥动作是出一对 3，依次点击两张 3，再点击“出牌”按钮。</plan><tool_call>left_click([55,850],[100,860],[430,755])</tool_call>
 
-在一个名为 <plan> 的 XML 标签中规划你的行动，然后将确切行动输出为一个名为 <tool_use> 的 XML 标签。
+
 当前人类指挥动作：{command}
 """
 
@@ -331,85 +328,9 @@ def _extract_xml_tag(text: str, tag: str):
     return match.group(1).strip()
 
 
-def _load_literal(text: str):
-    try:
-        return json.loads(text)
-    except Exception:
-        try:
-            return ast.literal_eval(text)
-        except Exception:
-            return None
-
-
-def _normalize_tool_use_list(parsed):
-    if isinstance(parsed, dict) and isinstance(parsed.get("tool_uses"), list):
-        return parsed["tool_uses"]
-    if isinstance(parsed, dict) and isinstance(parsed.get("tool_calls"), list):
-        return parsed["tool_calls"]
-    if isinstance(parsed, dict):
-        return [parsed]
-    if isinstance(parsed, list):
-        return parsed
-    return []
-
-
-def _tool_use_payload(tool_use):
-    if not isinstance(tool_use, dict):
-        return None, None
-    if isinstance(tool_use.get("function"), dict):
-        function = tool_use["function"]
-        return function.get("name"), function.get("arguments", {})
-    return tool_use.get("name"), tool_use.get("arguments", {})
-
-
-def _parse_command_coordinate(coordinate):
-    if not isinstance(coordinate, (list, tuple)) or len(coordinate) != 2:
-        return [], False
-    x, y = coordinate
-    if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-        return [], False
-    if not (0 <= float(x) <= 1000 and 0 <= float(y) <= 1000):
-        return [], False
-    return [float(x), float(y)], True
-
-
-def parse_command_tool_use_response(response: str, command: str, max_clicks: int):
-    tool_use_text = _extract_xml_tag(response, "tool_use") if isinstance(response, str) else None
-    parsed = _load_literal(tool_use_text or "")
-    tool_uses = _normalize_tool_use_list(parsed)
-    valid = bool(tool_use_text) and 0 < len(tool_uses) <= int(max_clicks)
-
-    clicks = []
-    normalized_tool_uses = []
-    if valid:
-        for tool_use in tool_uses:
-            name, arguments = _tool_use_payload(tool_use)
-            if isinstance(arguments, str):
-                arguments = _load_literal(arguments)
-            if name != "computer_use" or not isinstance(arguments, dict):
-                valid = False
-                break
-            if arguments.get("action") not in {"left_click", "click"}:
-                valid = False
-                break
-            click, coordinate_valid = _parse_command_coordinate(arguments.get("coordinate"))
-            if not coordinate_valid:
-                valid = False
-                break
-            clicks.append(click)
-            normalized_tool_uses.append(
-                {
-                    "name": "computer_use",
-                    "arguments": {
-                        "action": "left_click",
-                        "coordinate": click,
-                    },
-                }
-            )
-
-    if not valid:
-        clicks = []
-        normalized_tool_uses = []
+def parse_command_tool_call_response(response: str, command: str, max_clicks: int):
+    tool_call_text = _extract_xml_tag(response, "tool_call") if isinstance(response, str) else None
+    clicks, normalized_tool_calls, valid = parse_left_click_tool_call(tool_call_text or "", max_clicks=int(max_clicks))
 
     return {
         "clicks": clicks,
@@ -418,10 +339,10 @@ def parse_command_tool_use_response(response: str, command: str, max_clicks: int
         "chat": "",
         "memory": "",
         "raw_action_text": command.strip() if isinstance(command, str) else "",
-        "raw_tool_use_text": tool_use_text or "",
+        "raw_tool_call_text": tool_call_text or "",
         "raw_response": response if isinstance(response, str) else "",
-        "tool_calls": normalized_tool_uses,
-        "tool_calling": len(normalized_tool_uses),
+        "tool_calls": normalized_tool_calls,
+        "tool_calling": len(normalized_tool_calls),
     }
 
 
@@ -531,7 +452,7 @@ class DoudizhuSpectatorAgent:
             top_p=top_p,
             enable_thinking=enable_thinking,
         )
-        return response, parse_command_tool_use_response(response, command or "", max_clicks=env.max_clicks)
+        return response, parse_command_tool_call_response(response, command or "", max_clicks=env.max_clicks)
 
 
 def _api_chat_url(base_url: str) -> str:
@@ -679,7 +600,7 @@ class DoudizhuApiAgent:
             top_p=top_p,
             enable_thinking=enable_thinking,
         )
-        return response, parse_command_tool_use_response(response, command or "", max_clicks=env.max_clicks)
+        return response, parse_command_tool_call_response(response, command or "", max_clicks=env.max_clicks)
 
 
 def _load_spectator_agent(
@@ -1241,7 +1162,7 @@ def _commander_step_core(
             "commanded_action": command,
             "clicks": action.get("clicks", []),
             "projection_valid": action.get("projection_valid", 0),
-            "raw_tool_use_text": action.get("raw_tool_use_text", ""),
+            "raw_tool_call_text": action.get("raw_tool_call_text", ""),
             "raw_response": response,
         },
         ensure_ascii=False,
@@ -1356,8 +1277,8 @@ with gr.Blocks(title=ui("Doudizhu Human, Commander, and Spectator Debugger", "�
     with gr.Group(visible=False) as commander_page:
         gr.Markdown(
             ui(
-                "Give the semantic card action yourself; the model only converts that command into GUI computer_use clicks.",
-                "由人输入语义出牌动作；模型只负责把该指令转换成 GUI computer_use 点击。",
+                "Give the semantic card action yourself; the model only converts that command into left_click(...) GUI clicks.",
+                "由人输入语义出牌动作；模型只负责把该指令转换成 left_click(...) GUI 点击。",
             )
         )
         with gr.Row():
@@ -1395,7 +1316,7 @@ with gr.Blocks(title=ui("Doudizhu Human, Commander, and Spectator Debugger", "�
                     commander_reset_btn = gr.Button(ui("Reset Commander Game", "重置指挥游戏"))
                 commander_step_btn = gr.Button(ui("Execute Command", "执行指令"), variant="primary")
                 commander_status = gr.Textbox(label=ui("Commander Status", "指挥状态"), lines=12)
-                commander_action_json = gr.Textbox(label=ui("Projected tool_use / Raw Response", "投影 tool_use / 原始响应"), lines=12, interactive=False)
+                commander_action_json = gr.Textbox(label=ui("Projected tool_call / Raw Response", "投影 tool_call / 原始响应"), lines=12, interactive=False)
 
     mode_selector.change(
         switch_mode,
