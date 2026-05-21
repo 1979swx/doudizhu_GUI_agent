@@ -1,0 +1,155 @@
+{
+  "args": {
+    "output_dir": "data_synthesis/doudizhu_grounding_sft",
+    "train_samples": 30000,
+    "val_samples": 5000,
+    "test_samples": 5000,
+    "seed": 20260521,
+    "language": "zh",
+    "image_width": 640,
+    "image_height": 480,
+    "max_bot_turns": 256,
+    "category_weights": null,
+    "jitter": 0.25,
+    "log_every": 1000
+  },
+  "category_weights": {
+    "pass": 0.12,
+    "solo": 0.24,
+    "pair": 0.19,
+    "trio": 0.13,
+    "chain": 0.15,
+    "bomb_rocket": 0.06,
+    "other": 0.11
+  },
+  "format": {
+    "response": "single <tool_call> tag only",
+    "image_storage": "images=[{'bytes': PNG_BYTES}]",
+    "projection_max_clicks": 128
+  },
+  "splits": {
+    "train": {
+      "split": "train",
+      "target_samples": 30000,
+      "accepted_samples": 30000,
+      "episodes_used": 18220,
+      "seed_start": 20260521,
+      "quota_targets": {
+        "pass": 3600,
+        "solo": 7200,
+        "pair": 5700,
+        "trio": 3900,
+        "chain": 4500,
+        "bomb_rocket": 1800,
+        "other": 3300
+      },
+      "quota_remaining": {
+        "pass": 0,
+        "solo": 0,
+        "pair": 0,
+        "trio": 0,
+        "chain": 0,
+        "bomb_rocket": 0,
+        "other": 0
+      },
+      "category_counts": {
+        "solo": 7200,
+        "pass": 3600,
+        "pair": 5700,
+        "trio": 3900,
+        "chain": 4500,
+        "bomb_rocket": 1800,
+        "other": 3300
+      },
+      "source_counts": {
+        "quota_sample": 30000
+      },
+      "rejection_counts": {},
+      "skip_counts": {
+        "quota_full_for_legal_categories": 256055
+      }
+    },
+    "val": {
+      "split": "val",
+      "target_samples": 5000,
+      "accepted_samples": 5000,
+      "episodes_used": 3019,
+      "seed_start": 30260521,
+      "quota_targets": {
+        "pass": 600,
+        "solo": 1200,
+        "pair": 950,
+        "trio": 650,
+        "chain": 750,
+        "bomb_rocket": 300,
+        "other": 550
+      },
+      "quota_remaining": {
+        "pass": 0,
+        "solo": 0,
+        "pair": 0,
+        "trio": 0,
+        "chain": 0,
+        "bomb_rocket": 0,
+        "other": 0
+      },
+      "category_counts": {
+        "solo": 1200,
+        "pass": 600,
+        "pair": 950,
+        "chain": 750,
+        "trio": 650,
+        "bomb_rocket": 300,
+        "other": 550
+      },
+      "source_counts": {
+        "quota_sample": 5000
+      },
+      "rejection_counts": {},
+      "skip_counts": {
+        "quota_full_for_legal_categories": 42484
+      }
+    },
+    "test": {
+      "split": "test",
+      "target_samples": 5000,
+      "accepted_samples": 5000,
+      "episodes_used": 3137,
+      "seed_start": 40260521,
+      "quota_targets": {
+        "pass": 600,
+        "solo": 1200,
+        "pair": 950,
+        "trio": 650,
+        "chain": 750,
+        "bomb_rocket": 300,
+        "other": 550
+      },
+      "quota_remaining": {
+        "pass": 0,
+        "solo": 0,
+        "pair": 0,
+        "trio": 0,
+        "chain": 0,
+        "bomb_rocket": 0,
+        "other": 0
+      },
+      "category_counts": {
+        "solo": 1200,
+        "pass": 600,
+        "pair": 950,
+        "trio": 650,
+        "chain": 750,
+        "bomb_rocket": 300,
+        "other": 550
+      },
+      "source_counts": {
+        "quota_sample": 5000
+      },
+      "rejection_counts": {},
+      "skip_counts": {
+        "quota_full_for_legal_categories": 44714
+      }
+    }
+  }
+}
