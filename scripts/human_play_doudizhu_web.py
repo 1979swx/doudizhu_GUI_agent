@@ -3,7 +3,6 @@ import base64
 import io
 import json
 import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -63,7 +62,7 @@ from urllib.error import HTTPError, URLError
 #   The API backend sends the current screenshot as a PNG data URL in an
 #   OpenAI-compatible chat/completions request. The API response must still
 #   follow this script's XML prompt format, because the existing
-#   doudizhu_projection and command parser are reused. There is intentionally
+#   doudizhu projection parsers are reused. There is intentionally
 #   no format-repair or retry layer; invalid model output is surfaced directly
 #   in the UI. The default temperature is 1.0.
 #
@@ -84,8 +83,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 try:
     from agent_system.environments.env_package.doudizhu.envs import DoudizhuSingleEnv
+    from agent_system.environments.env_package.doudizhu.projection import doudizhu_projection
     from agent_system.environments.env_package.doudizhu_grounding.envs import DoudizhuGroundingSingleEnv
-    from agent_system.environments.env_package.doudizhu.projection import doudizhu_projection, parse_left_click_tool_call
+    from agent_system.environments.env_package.doudizhu_grounding.projection import doudizhu_grounding_projection
     from agent_system.environments.prompts.doudizhu import DOUDIZHU_VISUAL_TEMPLATE, DOUDIZHU_VISUAL_TEMPLATE_ZH
 except ImportError as e:
     print(f"Failed to import DoudizhuSingleEnv: {e}")
@@ -105,33 +105,32 @@ Your only job is to execute that commanded action on the screenshot. Do not choo
 - Otherwise, click each matching card in your bottom hand, then click the PLAY button.
 - Coordinates must be normalized numbers from 0 to 1000.
 
-Return exactly two XML tags. In <plan>, briefly identify what you will click. In <tool_call>, output exactly one left_click(...) call:
-<plan>Briefly identify which visible card(s) or button you will click.</plan><tool_call>left_click([x1,y1],[x2,y2])</tool_call>
+Return exactly one XML tag. Do not output any explanation or other tags:
+<tool_call>left_click([x1,y1],[x2,y2])</tool_call>
 """
 COMMAND_PROMPT_TEMPLATE_ZH = """
 你正在通过鼠标点击来控制斗地主 GUI。
 
-人类指挥动作：{command}
+指挥动作：{command}
 
-<image>你的任务是在截图中执行这个人类指挥动作。不要自行选择其它出牌。
+<image>你的任务是在截图中执行这个指挥动作。不要自行选择其它出牌。
 - 你通过 [x,y] 坐标来进行点击动作，坐标必须是 0 到 1000 范围内的归一化数字，[0,0] 代表左上角，[1000,1000] 代表右下角。
 - 游戏页面的底部有手牌，其上方有‘出牌’和‘不要’按钮，这是主要交互区域。
 - 如果指挥动作是“不要”或 pass，只点击“不要”按钮。
 - 如果指挥动作是出牌，则依次点击底部手牌中与指挥动作匹配的每张牌，然后点击“出牌”按钮。
 - 也就是说，每一轮动作的最后必须以点击“出牌”或“不要”两个按钮之一结尾。
+- 工具定义：left_click([x1,y1],[x2,y2],...,[xN,yN]) ，支持批量点击，每个坐标对代表一次点击，N个坐标对代表N次点击。一次性输出本轮的所有点击。
 
-输出一个 left_click([x1,y1],[x2,y2],...,[xN,yN]) 调用，每个坐标对代表一次点击，N个坐标对代表N次点击。
+输出一个名为 <tool_call> </tool_call> 的 XML 标签，标签内是一个 left_click([x1,y1],[x2,y2],...,[xN,yN]) 调用。
 
-在一个名为 <plan> </plan> 的 XML 标签包裹中规划你的行动，然后将确切行动输出为一个名为 <tool_call> </tool_call> 的 XML 标签包裹中。
 例子：
 指挥动作：不要
-输出：<plan>指挥动作是不要，只点击“不要”按钮完成本轮。</plan><tool_call>left_click([566,764])</tool_call>
+输出：<tool_call>left_click([566,764])</tool_call>
 
 指挥动作：3 3
-输出：<plan>指挥动作是出一对 3，依次点击两张 3，再点击“出牌”按钮。</plan><tool_call>left_click([55,850],[100,860],[430,755])</tool_call>
+输出：<tool_call>left_click([55,850],[100,860],[430,755])</tool_call>
 
-
-当前人类指挥动作：{command}
+当前指挥动作：{command}
 """
 
 
@@ -341,29 +340,18 @@ def _get_auto_model_class(model_dir: str):
     return AutoModelForCausalLM
 
 
-def _extract_xml_tag(text: str, tag: str):
-    match = re.search(rf"<{tag}>(.*?)</{tag}>", text, flags=re.IGNORECASE | re.DOTALL)
-    if match is None:
-        return None
-    return match.group(1).strip()
-
-
 def parse_command_tool_call_response(response: str, command: str, max_clicks: int):
-    tool_call_text = _extract_xml_tag(response, "tool_call") if isinstance(response, str) else None
-    clicks, normalized_tool_calls, valid = parse_left_click_tool_call(tool_call_text or "", max_clicks=int(max_clicks))
-
-    return {
-        "clicks": clicks,
-        "projection_valid": int(valid),
-        "semantic_action": command.strip() if isinstance(command, str) else "",
-        "chat": "",
-        "memory": "",
-        "raw_action_text": command.strip() if isinstance(command, str) else "",
-        "raw_tool_call_text": tool_call_text or "",
-        "raw_response": response if isinstance(response, str) else "",
-        "tool_calls": normalized_tool_calls,
-        "tool_calling": len(normalized_tool_calls),
-    }
+    actions, _valids = doudizhu_grounding_projection([response], max_clicks=int(max_clicks))
+    action = actions[0]
+    action.update(
+        {
+            "semantic_action": command.strip() if isinstance(command, str) else "",
+            "raw_action_text": command.strip() if isinstance(command, str) else "",
+            "chat": "",
+            "memory": "",
+        }
+    )
+    return action
 
 
 class DoudizhuSpectatorAgent:

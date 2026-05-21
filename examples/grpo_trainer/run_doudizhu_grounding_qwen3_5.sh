@@ -33,7 +33,7 @@ ref_param_offload="${REF_PARAM_OFFLOAD:-True}"
 total_epochs="${TOTAL_EPOCHS:-60}"
 save_freq="${SAVE_FREQ:-15}"
 test_freq="${TEST_FREQ:-5}"
-logger="${LOGGER:-['console','wandb']}"
+logger="${LOGGER:-['console']}"
 
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
 export RAY_DEDUP_LOGS="${RAY_DEDUP_LOGS:-0}"

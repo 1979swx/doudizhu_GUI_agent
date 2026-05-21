@@ -5,6 +5,8 @@ from agent_system.environments.env_package.doudizhu.projection import (
     parse_left_click_tool_call,
 )
 
+DISALLOWED_TAG_NAMES = ("plan", "action", "chat", "memory")
+
 
 def _empty_action(raw_text: Any = "") -> Dict[str, Any]:
     return {
@@ -28,10 +30,9 @@ def doudizhu_grounding_projection(text_actions: List[str], max_clicks: int = 12)
             valids.append(0)
             continue
 
-        plan = extract_tag(response, "plan")
+        disallowed_tag_present = any(extract_tag(response, tag) is not None for tag in DISALLOWED_TAG_NAMES)
         tool_call_text = extract_tag(response, "tool_call")
-        has_required_tags = bool(plan) and bool(tool_call_text)
-        if has_required_tags:
+        if tool_call_text and not disallowed_tag_present:
             clicks, tool_calls, action_valid = parse_left_click_tool_call(tool_call_text or "", max_clicks=max_clicks)
         else:
             clicks, tool_calls, action_valid = [], [], False
@@ -40,7 +41,7 @@ def doudizhu_grounding_projection(text_actions: List[str], max_clicks: int = 12)
         structured_actions.append(
             {
                 "clicks": clicks if action_valid else [],
-                "plan": plan or "",
+                "plan": "",
                 "raw_tool_call_text": tool_call_text or "",
                 "tool_calls": tool_calls if action_valid else [],
                 "tool_calling": len(tool_calls) if action_valid else 0,

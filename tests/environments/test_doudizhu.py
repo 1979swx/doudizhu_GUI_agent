@@ -3,14 +3,12 @@ from functools import partial
 import numpy as np
 from omegaconf import OmegaConf
 
-from agent_system.environments.env_manager import DoudizhuEnvironmentManager
-from agent_system.environments.env_manager import DoudizhuGroundingEnvironmentManager
+from agent_system.environments.env_manager import DoudizhuEnvironmentManager, DoudizhuGroundingEnvironmentManager
 from agent_system.environments.env_package.doudizhu import build_doudizhu_envs, doudizhu_projection
 from agent_system.environments.env_package.doudizhu.core.base import Card
 from agent_system.environments.env_package.doudizhu.envs import DoudizhuSingleEnv
 from agent_system.environments.env_package.doudizhu.renderer import DoudizhuRenderer
 from agent_system.environments.env_package.doudizhu_grounding import build_doudizhu_grounding_envs, doudizhu_grounding_projection
-
 
 TOOL_CALL_RESPONSE = (
     "<plan>plan</plan>"
@@ -126,19 +124,25 @@ def test_doudizhu_projection_valid_and_invalid_cases():
     assert actions[1]["clicks"] == []
 
 
-def test_doudizhu_grounding_projection_requires_plan_and_tool_call_only():
+def test_doudizhu_grounding_projection_requires_tool_call_only():
     actions, valids = doudizhu_grounding_projection(
         [
-            "<plan>click the 3 then play</plan><tool_call>left_click([55,870],[424,758])</tool_call>",
             "<tool_call>left_click([55,870],[424,758])</tool_call>",
-            "<plan>p</plan><action>3</action><tool_call>left_click([55,870])</tool_call><chat>x</chat><memory>m</memory>",
+            "<plan>legacy plan is invalid</plan><tool_call>left_click([55,870])</tool_call>",
+            "<action>3</action><tool_call>left_click([55,870])</tool_call>",
+            "<chat>x</chat><tool_call>left_click([55,870])</tool_call>",
+            "<memory>x</memory><tool_call>left_click([55,870])</tool_call>",
+            "<plan>missing tool call</plan>",
+            "<tool_call>not-json</tool_call>",
         ],
         max_clicks=8,
     )
 
-    assert valids == [1, 0, 1]
+    assert valids == [1, 0, 0, 0, 0, 0, 0]
     assert actions[0]["clicks"] == [[55.0, 870.0], [424.0, 758.0]]
-    assert actions[0]["plan"] == "click the 3 then play"
+    assert actions[0]["plan"] == ""
+    assert actions[1]["clicks"] == []
+    assert actions[1]["plan"] == ""
 
 
 def test_single_env_executes_gui_clicks_and_fallback():
@@ -413,9 +417,8 @@ def test_doudizhu_grounding_vector_shares_canonical_game_across_group():
     oracle_action = {
         "clicks": _oracle_clicks_for_target(local_env, target_action),
         "projection_valid": 1,
-        "plan": "oracle",
     }
-    bad_action = {"clicks": [], "projection_valid": 0, "plan": ""}
+    bad_action = {"clicks": [], "projection_valid": 0}
 
     next_obs, rewards, dones, step_infos = env.step([oracle_action, bad_action])
     assert next_obs.shape == (2, 480, 640, 3)
@@ -444,17 +447,17 @@ def test_doudizhu_grounding_manager_uses_next_teacher_command_for_next_prompt():
     )
     manager = DoudizhuGroundingEnvironmentManager(envs, partial(doudizhu_grounding_projection, max_clicks=8), config)
     obs, infos = manager.reset(kwargs=None)
-    assert "指挥出牌" in obs["text"][0]
+    assert "指挥动作" in obs["text"][0]
+    assert "<plan>" not in obs["text"][0]
+    assert "<tool_call>" in obs["text"][0]
     assert infos[0]["target_action_pretty"] in obs["text"][0]
 
     local_env = envs.workers[0].env
     target_action = infos[0]["target_action"]
     clicks = _oracle_clicks_for_target(local_env, target_action)
-    response = "<plan>执行指挥动作。</plan><tool_call>left_click({})</tool_call>".format(
-        ",".join(f"[{x:.3f},{y:.3f}]" for x, y in clicks)
-    )
+    response = "<tool_call>left_click({})</tool_call>".format(",".join(f"[{x:.3f},{y:.3f}]" for x, y in clicks))
 
-    next_obs, rewards, dones, step_infos = manager.step([response, "<plan>空</plan><tool_call>left_click([1,1])</tool_call>"])
+    next_obs, rewards, dones, step_infos = manager.step([response, "<tool_call>left_click([1,1])</tool_call>"])
     assert rewards[0] > rewards[1]
     assert step_infos[0]["is_projection_valid"].item() == 1
     assert step_infos[0]["next_target_action_pretty"] in next_obs["text"][0]
