@@ -1,9 +1,48 @@
-# Doudizhu Grounding SFT Synthesis
+# Doudizhu SFT Synthesis
 
 This directory contains standalone data synthesis utilities. They do not modify
 the training or environment code paths.
 
-## Generate data
+## Generate QA data
+
+The QA generator implements the first two phases from
+`study_guide/doudizhu_QA_data_synthesis_plan.md`: hand reading, counting,
+basic/compound card type recognition, legal action understanding, candidate
+legality, and candidate card type QA.
+
+Run from the repository root in the environment that has the Dou Dizhu
+dependencies installed:
+
+```bash
+conda activate verl-agent-bw
+python data_synthesis/doudizhu_qa_sft.py \
+  --output-dir data_synthesis/doudizhu_qa_sft \
+  --train-samples 15000 \
+  --val-samples 2000 \
+  --test-samples 2000 \
+  --language zh
+```
+
+The script writes `train.parquet`, `val.parquet`, `test.parquet`, and
+`metadata.json`. Each row stores:
+
+- `data_source=doudizhu_qa_sft`
+- `prompt` and `question` with one image placeholder
+- `images=[{"bytes": PNG_BYTES}]`
+- `answer` using `<answer>` only for direct reading/counting tasks, or
+  `<plan>` plus `<answer>` for rule tasks
+- `extra_info.gold`, `extra_info.plan_aux`, and verifier metadata
+
+Optional HTML review:
+
+```bash
+python data_synthesis/visualize_doudizhu_qa_sft.py \
+  --input data_synthesis/doudizhu_qa_sft/train.parquet \
+  --output data_synthesis/doudizhu_qa_sft/review.html \
+  --num-samples 40
+```
+
+## Generate grounding data
 
 Run from the repository root in the environment that has the Dou Dizhu
 dependencies installed:
