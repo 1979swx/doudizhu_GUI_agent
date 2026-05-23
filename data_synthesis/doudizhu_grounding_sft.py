@@ -42,13 +42,13 @@ from agent_system.environments.prompts.doudizhu_grounding import (  # noqa: E402
 
 
 DEFAULT_CATEGORY_WEIGHTS = {
-    "pass": 0.12,
-    "solo": 0.24,
-    "pair": 0.19,
-    "trio": 0.13,
-    "chain": 0.15,
-    "bomb_rocket": 0.06,
-    "other": 0.11,
+    "pass": 0.06,
+    "solo": 0.25,
+    "pair": 0.20,
+    "trio": 0.14,
+    "chain": 0.16,
+    "bomb_rocket": 0.07,
+    "other": 0.12,
 }
 PROJECTION_MAX_CLICKS = 128
 

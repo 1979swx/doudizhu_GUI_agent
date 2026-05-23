@@ -9,12 +9,14 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+from io import BytesIO
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from PIL import Image
 from torch.distributed.fsdp import CPUOffload, FullStateDictConfig, MixedPrecision, ShardingStrategy, StateDictType
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
@@ -79,11 +81,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--save-freq", type=int, default=500)
     parser.add_argument("--val-freq", type=int, default=500)
+    parser.add_argument("--save-final", type=str_to_bool, default=True)
     parser.add_argument("--fsdp-sharding", choices=("zero2", "zero3", "no_shard", "hybrid"), default="zero3")
     parser.add_argument("--fsdp-min-num-params", type=int, default=0)
     parser.add_argument("--fsdp-transformer-layer-cls-to-wrap", default=None)
     parser.add_argument("--cpu-offload", type=str_to_bool, default=False)
     parser.add_argument("--attn-implementation", default="sdpa")
+    parser.add_argument("--model-dtype", choices=("fp32", "bf16"), default="fp32")
     parser.add_argument("--trust-remote-code", type=str_to_bool, default=False)
     parser.add_argument("--gradient-checkpointing", type=str_to_bool, default=True)
     parser.add_argument("--enable-thinking", type=str_to_bool, default=False)
@@ -147,10 +151,25 @@ def encode_text_and_images(processor, text: str, images: list[Any] | None) -> di
     return processor(text=[text], return_tensors="pt")
 
 
+def decode_image(image: Any) -> Image.Image:
+    if isinstance(image, Image.Image):
+        return image.convert("RGB")
+    if isinstance(image, dict):
+        if "bytes" in image:
+            return Image.open(BytesIO(image["bytes"])).convert("RGB")
+        if isinstance(image.get("image"), bytes):
+            return Image.open(BytesIO(image["image"])).convert("RGB")
+        if isinstance(image.get("image"), BytesIO):
+            return Image.open(image["image"]).convert("RGB")
+    return process_image(dict(image) if isinstance(image, dict) else image)
+
+
 def normalize_messages(prompt_value: Any, has_images: bool) -> list[dict[str, Any]]:
     prompt_value = series_to_item(prompt_value)
     if isinstance(prompt_value, str):
         messages = [{"role": "user", "content": prompt_value}]
+    elif isinstance(prompt_value, dict):
+        messages = [dict(prompt_value)]
     elif isinstance(prompt_value, list):
         messages = [dict(message) for message in prompt_value]
     else:
@@ -222,7 +241,7 @@ class SyntheticSFTDataset(Dataset):
             raw_images = [raw_images]
         if not raw_images:
             return None
-        return [process_image(dict(image) if isinstance(image, dict) else image) for image in raw_images]
+        return [decode_image(dict(image) if isinstance(image, dict) else image) for image in raw_images]
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         row = self.dataframe.iloc[index]
@@ -297,7 +316,18 @@ class SFTCollator:
             if not values:
                 continue
             if all(isinstance(value, torch.Tensor) for value in values):
-                output[key] = torch.cat(values, dim=0)
+                if key.endswith("token_type_ids"):
+                    padded_values = []
+                    for value in values:
+                        if value.dim() == 1:
+                            padded_values.append(F.pad(value, (0, max_len - value.shape[-1]), value=0))
+                        elif value.dim() == 2 and value.shape[0] == 1:
+                            padded_values.append(F.pad(value, (0, max_len - value.shape[-1]), value=0))
+                        else:
+                            raise ValueError(f"Unsupported token type tensor shape for {key}: {tuple(value.shape)}")
+                    output[key] = torch.stack(padded_values, dim=0) if padded_values[0].dim() == 1 else torch.cat(padded_values, dim=0)
+                else:
+                    output[key] = torch.cat(values, dim=0)
         if include_raw_features:
             output["_raw_features"] = features
         return output
@@ -334,16 +364,18 @@ def build_model(args: argparse.Namespace, local_model_path: str, rank: int, devi
         trust_remote_code=args.trust_remote_code,
         attn_implementation=args.attn_implementation,
     )
+    model_dtype = torch.float32 if args.model_dtype == "fp32" else torch.bfloat16
     init_context = get_init_weight_context_manager(use_meta_tensor=not getattr(config, "tie_word_embeddings", False), mesh=None)
     with init_context():
         model_cls = model_class_for_config(config)
         model = model_cls.from_pretrained(
             local_model_path,
             config=config,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=model_dtype,
             trust_remote_code=args.trust_remote_code,
         )
         apply_monkey_patch(model=model, ulysses_sp_size=1, use_remove_padding=False)
+        model.to(model_dtype)
 
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -371,7 +403,7 @@ def build_model(args: argparse.Namespace, local_model_path: str, rank: int, devi
         forward_prefetch=False,
     )
     if rank == 0:
-        print(f"Loaded {model_cls.__name__} with FSDP sharding={args.fsdp_sharding}")
+        print(f"Loaded {model_cls.__name__} with FSDP sharding={args.fsdp_sharding}, model_dtype={args.model_dtype}")
     return model, fsdp_model
 
 
@@ -606,7 +638,8 @@ def main() -> None:
             print(f"final val_loss={val_loss:.6f}")
             if wandb_run is not None:
                 wandb_run.log({"val/loss": val_loss}, step=global_step)
-    save_checkpoint(args, global_step, model, fsdp_model, processor, rank)
+    if args.save_final:
+        save_checkpoint(args, global_step, model, fsdp_model, processor, rank)
     if wandb_run is not None:
         wandb_run.finish()
     dist.destroy_process_group()
