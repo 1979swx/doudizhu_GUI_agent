@@ -10,17 +10,17 @@
     "image_height": 480,
     "max_bot_turns": 256,
     "category_weights": null,
-    "jitter": 0.25,
+    "jitter": 0.2,
     "log_every": 1000
   },
   "category_weights": {
-    "pass": 0.06,
-    "solo": 0.25,
-    "pair": 0.2,
-    "trio": 0.14,
-    "chain": 0.16,
-    "bomb_rocket": 0.07,
-    "other": 0.12
+    "pass": 0.05,
+    "solo": 0.18,
+    "pair": 0.22,
+    "trio": 0.18,
+    "chain": 0.18,
+    "bomb_rocket": 0.05,
+    "other": 0.14
   },
   "format": {
     "response": "single <tool_call> tag only",
@@ -32,16 +32,16 @@
       "split": "train",
       "target_samples": 20000,
       "accepted_samples": 20000,
-      "episodes_used": 13115,
+      "episodes_used": 15390,
       "seed_start": 20260521,
       "quota_targets": {
-        "pass": 1200,
-        "solo": 5000,
-        "pair": 4000,
-        "trio": 2800,
-        "chain": 3200,
-        "bomb_rocket": 1400,
-        "other": 2400
+        "pass": 1000,
+        "solo": 3600,
+        "pair": 4400,
+        "trio": 3600,
+        "chain": 3600,
+        "bomb_rocket": 1000,
+        "other": 2800
       },
       "quota_remaining": {
         "pass": 0,
@@ -53,36 +53,36 @@
         "other": 0
       },
       "category_counts": {
-        "solo": 5000,
-        "pass": 1200,
-        "pair": 4000,
-        "trio": 2800,
-        "chain": 3200,
-        "bomb_rocket": 1400,
-        "other": 2400
+        "pair": 4400,
+        "pass": 1000,
+        "solo": 3600,
+        "chain": 3600,
+        "bomb_rocket": 1000,
+        "trio": 3600,
+        "other": 2800
       },
       "source_counts": {
         "quota_sample": 20000
       },
       "rejection_counts": {},
       "skip_counts": {
-        "quota_full_for_legal_categories": 185791
+        "quota_full_for_legal_categories": 221362
       }
     },
     "val": {
       "split": "val",
       "target_samples": 3000,
       "accepted_samples": 3000,
-      "episodes_used": 1969,
+      "episodes_used": 2264,
       "seed_start": 30260521,
       "quota_targets": {
-        "pass": 180,
-        "solo": 750,
-        "pair": 600,
-        "trio": 420,
-        "chain": 480,
-        "bomb_rocket": 210,
-        "other": 360
+        "pass": 150,
+        "solo": 540,
+        "pair": 660,
+        "trio": 540,
+        "chain": 540,
+        "bomb_rocket": 150,
+        "other": 420
       },
       "quota_remaining": {
         "pass": 0,
@@ -94,36 +94,36 @@
         "other": 0
       },
       "category_counts": {
-        "solo": 750,
-        "pass": 180,
-        "pair": 600,
-        "chain": 480,
-        "bomb_rocket": 210,
-        "trio": 420,
-        "other": 360
+        "pair": 660,
+        "pass": 150,
+        "chain": 540,
+        "solo": 540,
+        "bomb_rocket": 150,
+        "trio": 540,
+        "other": 420
       },
       "source_counts": {
         "quota_sample": 3000
       },
       "rejection_counts": {},
       "skip_counts": {
-        "quota_full_for_legal_categories": 27976
+        "quota_full_for_legal_categories": 32802
       }
     },
     "test": {
       "split": "test",
       "target_samples": 3000,
       "accepted_samples": 3000,
-      "episodes_used": 2043,
+      "episodes_used": 2352,
       "seed_start": 40260521,
       "quota_targets": {
-        "pass": 180,
-        "solo": 750,
-        "pair": 600,
-        "trio": 420,
-        "chain": 480,
-        "bomb_rocket": 210,
-        "other": 360
+        "pass": 150,
+        "solo": 540,
+        "pair": 660,
+        "trio": 540,
+        "chain": 540,
+        "bomb_rocket": 150,
+        "other": 420
       },
       "quota_remaining": {
         "pass": 0,
@@ -135,20 +135,20 @@
         "other": 0
       },
       "category_counts": {
-        "solo": 750,
-        "pass": 180,
-        "pair": 600,
-        "trio": 420,
-        "chain": 480,
-        "bomb_rocket": 210,
-        "other": 360
+        "pair": 660,
+        "pass": 150,
+        "solo": 540,
+        "chain": 540,
+        "bomb_rocket": 150,
+        "trio": 540,
+        "other": 420
       },
       "source_counts": {
         "quota_sample": 3000
       },
       "rejection_counts": {},
       "skip_counts": {
-        "quota_full_for_legal_categories": 29374
+        "quota_full_for_legal_categories": 34009
       }
     }
   }

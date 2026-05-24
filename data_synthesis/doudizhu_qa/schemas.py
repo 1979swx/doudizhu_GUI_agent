@@ -11,6 +11,7 @@ class GenerationConfig:
     language: str = "zh"
     n_all: int = 3
     list_k: int = 4
+    label_quotas_enabled: bool = True
 
 
 @dataclass(frozen=True)

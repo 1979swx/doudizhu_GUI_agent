@@ -61,6 +61,134 @@ def quota_remaining(counts: Counter[str], targets: dict[str, int]) -> dict[str, 
     return {task_id: max(0, target - int(counts.get(task_id, 0))) for task_id, target in targets.items()}
 
 
+def normalize_label_weights(raw_weights: dict[str, float]) -> dict[str, float]:
+    weights = {bucket: max(0.0, float(weight)) for bucket, weight in raw_weights.items()}
+    total = sum(weights.values())
+    if total <= 0:
+        return {}
+    return {bucket: weight / total for bucket, weight in weights.items()}
+
+
+def label_quota_weights(task_specs: list[TaskSpec], config: GenerationConfig) -> dict[str, dict[str, float]]:
+    if not config.label_quotas_enabled:
+        return {}
+    weights: dict[str, dict[str, float]] = {}
+    for spec in task_specs:
+        normalized = normalize_label_weights(spec.label_bucket_weights(config))
+        if normalized:
+            weights[spec.task_id] = normalized
+    return weights
+
+
+def label_quota_targets(
+    task_targets: dict[str, int],
+    label_weights: dict[str, dict[str, float]],
+) -> dict[str, dict[str, int]]:
+    return {
+        task_id: quota_targets(int(task_targets.get(task_id, 0)), weights)
+        for task_id, weights in label_weights.items()
+    }
+
+
+def label_quota_remaining(
+    label_counts: Counter[tuple[str, str]],
+    label_targets: dict[str, dict[str, int]],
+) -> dict[str, dict[str, int]]:
+    return {
+        task_id: {
+            bucket: max(0, target - int(label_counts.get((task_id, bucket), 0)))
+            for bucket, target in bucket_targets.items()
+        }
+        for task_id, bucket_targets in label_targets.items()
+    }
+
+
+def nested_label_counts(
+    label_counts: Counter[tuple[str, str]],
+    label_targets: dict[str, dict[str, int]],
+) -> dict[str, dict[str, int]]:
+    nested: dict[str, dict[str, int]] = {task_id: {bucket: 0 for bucket in targets} for task_id, targets in label_targets.items()}
+    for (task_id, bucket), count in label_counts.items():
+        nested.setdefault(task_id, {})[bucket] = int(count)
+    return nested
+
+
+def best_label_deficit_for_state(
+    spec: TaskSpec,
+    state: dict[str, Any],
+    config: GenerationConfig,
+    label_counts: Counter[tuple[str, str]],
+    label_targets: dict[str, dict[str, int]],
+) -> tuple[float, int]:
+    bucket_targets = label_targets.get(spec.task_id, {})
+    if not bucket_targets:
+        return (0.0, 0)
+    best_ratio = 0.0
+    best_deficit = 0
+    for bucket in spec.label_buckets_for_state(state, config):
+        target = int(bucket_targets.get(bucket, 0))
+        if target <= 0:
+            continue
+        deficit = target - int(label_counts.get((spec.task_id, bucket), 0))
+        if deficit <= 0:
+            continue
+        ratio = float(deficit) / float(target)
+        if (ratio, deficit) > (best_ratio, best_deficit):
+            best_ratio = ratio
+            best_deficit = deficit
+    return (best_ratio, best_deficit)
+
+
+def task_has_remaining_label_quota(
+    spec: TaskSpec,
+    label_counts: Counter[tuple[str, str]],
+    label_targets: dict[str, dict[str, int]],
+) -> bool:
+    return any(
+        int(label_counts.get((spec.task_id, bucket), 0)) < int(target)
+        for bucket, target in label_targets.get(spec.task_id, {}).items()
+    )
+
+
+def state_labels_are_saturated(
+    spec: TaskSpec,
+    state: dict[str, Any],
+    config: GenerationConfig,
+    label_counts: Counter[tuple[str, str]],
+    label_targets: dict[str, dict[str, int]],
+) -> bool:
+    if not task_has_remaining_label_quota(spec, label_counts, label_targets):
+        return False
+    possible_buckets = spec.label_buckets_for_state(state, config)
+    if not possible_buckets:
+        return False
+    return best_label_deficit_for_state(spec, state, config, label_counts, label_targets)[1] <= 0
+
+
+def choose_label_bucket_for_state(
+    spec: TaskSpec,
+    state: dict[str, Any],
+    config: GenerationConfig,
+    label_counts: Counter[tuple[str, str]],
+    label_targets: dict[str, dict[str, int]],
+    rng: random.Random,
+) -> str | None:
+    candidates: list[tuple[float, int, str]] = []
+    for bucket in spec.label_buckets_for_state(state, config):
+        target = int(label_targets.get(spec.task_id, {}).get(bucket, 0))
+        if target <= 0:
+            continue
+        deficit = target - int(label_counts.get((spec.task_id, bucket), 0))
+        if deficit <= 0:
+            continue
+        candidates.append((float(deficit) / float(target), deficit, bucket))
+    if not candidates:
+        return None
+    best_score = max((ratio, deficit) for ratio, deficit, _bucket in candidates)
+    best_buckets = sorted(bucket for ratio, deficit, bucket in candidates if (ratio, deficit) == best_score)
+    return rng.choice(best_buckets)
+
+
 def rare_preferred_task_ids(tags: dict[str, Any]) -> set[str]:
     preferred: set[str] = set()
     if tags.get("has_bomb") or tags.get("has_rocket"):
@@ -89,6 +217,8 @@ def choose_task_specs_for_state(
     config: GenerationConfig,
     counts: Counter[str],
     targets: dict[str, int],
+    label_counts: Counter[tuple[str, str]],
+    label_targets: dict[str, dict[str, int]],
     rng: random.Random,
     max_tasks_per_state: int,
 ) -> list[TaskSpec]:
@@ -105,21 +235,25 @@ def choose_task_specs_for_state(
     selected: list[TaskSpec] = []
     remaining = applicable[:]
 
-    def deficit_key(spec: TaskSpec) -> tuple[float, float, str]:
+    def deficit_key(spec: TaskSpec) -> tuple[float, float, float, float, str]:
         target = max(1, int(targets.get(spec.task_id, 0)))
         deficit = int(targets.get(spec.task_id, 0)) - int(counts.get(spec.task_id, 0))
-        return (float(deficit) / float(target), float(deficit), spec.task_id)
+        label_ratio, label_deficit = best_label_deficit_for_state(spec, state, config, label_counts, label_targets)
+        return (label_ratio, float(label_deficit), float(deficit) / float(target), float(deficit), spec.task_id)
 
     for pool_filter in (
-        lambda spec: spec.task_id in preferred_ids,
+        lambda spec: best_label_deficit_for_state(spec, state, config, label_counts, label_targets)[1] > 0,
+        lambda spec: spec.task_id in preferred_ids
+        and not state_labels_are_saturated(spec, state, config, label_counts, label_targets),
+        lambda spec: not state_labels_are_saturated(spec, state, config, label_counts, label_targets),
         lambda spec: True,
     ):
         while len(selected) < max_tasks_per_state:
             pool = [spec for spec in remaining if pool_filter(spec)]
             if not pool:
                 break
-            best_score = max(deficit_key(spec)[:2] for spec in pool)
-            best = [spec for spec in pool if deficit_key(spec)[:2] == best_score]
+            best_score = max(deficit_key(spec)[:4] for spec in pool)
+            best = [spec for spec in pool if deficit_key(spec)[:4] == best_score]
             chosen = rng.choice(sorted(best, key=lambda spec: spec.task_id))
             selected.append(chosen)
             remaining.remove(chosen)
@@ -154,8 +288,9 @@ def generated_sample_for_spec(
     state: dict[str, Any],
     rng: random.Random,
     config: GenerationConfig,
+    label_bucket: str | None = None,
 ) -> GeneratedSample | None:
-    gold = spec.build_gold(state, rng, config)
+    gold = spec.build_gold_for_label(state, rng, config, label_bucket) if label_bucket else spec.build_gold(state, rng, config)
     if gold is None:
         return None
     response = spec.build_response(gold)
@@ -187,6 +322,7 @@ def make_row(
         "step_index": step_index,
         "task_id": sample.gold.task_id,
         "task_name": sample.gold.task_name,
+        "label_bucket": state_meta.get("label_bucket"),
         "current_hand_raw": state_meta.get("current_hand_raw", ""),
         "current_hand_display": state_meta.get("current_hand_display", []),
         "legal_actions_raw": legal_actions_raw,
@@ -231,9 +367,13 @@ def synthesize_split(
     task_by_id = {spec.task_id: spec for spec in task_specs}
     weights = normalize_weights(task_specs, raw_task_weights)
     targets = quota_targets(target_samples, weights)
+    label_weights = label_quota_weights(task_specs, generation_config)
+    label_targets = label_quota_targets(targets, label_weights)
     counts: Counter[str] = Counter()
+    label_counts: Counter[tuple[str, str]] = Counter()
     rejection_counts: Counter[str] = Counter()
     skip_counts: Counter[str] = Counter()
+    label_skip_counts: Counter[str] = Counter()
     rarity_counts: Counter[str] = Counter()
     hand_length_counts: Counter[str] = Counter()
     legal_action_count_counts: Counter[str] = Counter()
@@ -270,6 +410,8 @@ def synthesize_split(
                 config=generation_config,
                 counts=counts,
                 targets=targets,
+                label_counts=label_counts,
+                label_targets=label_targets,
                 rng=rng,
                 max_tasks_per_state=max_tasks_per_state,
             )
@@ -279,7 +421,27 @@ def synthesize_split(
             for spec in selected_specs:
                 if quota_complete(counts, targets) or int(counts.get(spec.task_id, 0)) >= int(targets.get(spec.task_id, 0)):
                     continue
-                sample = generated_sample_for_spec(spec, state, rng, generation_config)
+                desired_label_bucket = choose_label_bucket_for_state(
+                    spec,
+                    state,
+                    generation_config,
+                    label_counts,
+                    label_targets,
+                    rng,
+                )
+                if desired_label_bucket is None and state_labels_are_saturated(
+                    spec,
+                    state,
+                    generation_config,
+                    label_counts,
+                    label_targets,
+                ):
+                    label_skip_counts[f"{spec.task_id}:label_saturated_state"] += 1
+                    continue
+                sample = generated_sample_for_spec(spec, state, rng, generation_config, desired_label_bucket)
+                if sample is None and desired_label_bucket:
+                    label_skip_counts[f"{spec.task_id}:{desired_label_bucket}:no_gold"] += 1
+                    sample = generated_sample_for_spec(spec, state, rng, generation_config)
                 if sample is None:
                     skip_counts[f"{spec.task_id}:no_gold"] += 1
                     continue
@@ -299,6 +461,9 @@ def synthesize_split(
                 )
                 rows.append(row)
                 counts[spec.task_id] += 1
+                label_bucket = spec.label_bucket_for_gold(sample.gold)
+                if label_bucket:
+                    label_counts[(spec.task_id, label_bucket)] += 1
                 if log_every > 0 and len(rows) > 0 and len(rows) % log_every == 0 and len(rows) != last_logged:
                     last_logged = len(rows)
                     print(
@@ -322,9 +487,15 @@ def synthesize_split(
         "task_counts": dict(counts),
         "task_names": {task_id: task_by_id[task_id].task_name for task_id in task_by_id},
         "task_weights": weights,
+        "label_quotas_enabled": generation_config.label_quotas_enabled,
+        "label_weights": label_weights,
+        "label_targets": label_targets,
+        "label_counts": nested_label_counts(label_counts, label_targets),
+        "label_quota_remaining": label_quota_remaining(label_counts, label_targets),
         "quota_remaining": quota_remaining(counts, targets),
         "rejection_counts": dict(rejection_counts),
         "skip_counts": dict(skip_counts),
+        "label_skip_counts": dict(label_skip_counts),
         "rarity_state_counts": dict(rarity_counts),
         "hand_length_counts": dict(hand_length_counts),
         "legal_action_count_counts": dict(legal_action_count_counts),

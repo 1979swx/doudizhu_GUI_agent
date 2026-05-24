@@ -33,6 +33,15 @@ The script writes `train.parquet`, `val.parquet`, `test.parquet`, and
   `<plan>` plus `<answer>` for rule tasks
 - `extra_info.gold`, `extra_info.plan_aux`, and verifier metadata
 
+The QA sampler also steers within-task label quotas for the most skew-prone
+tasks: Task F true/false, H2 any plane attachment true/false, Task I can-pass
+true/false, Task K legal-action-count buckets, and Task M legal/illegal reason
+buckets. While a task still has an unmet label bucket, already-full buckets for
+that task are skipped and the sampler keeps scanning later game states. The
+result is recorded in `metadata.json` as `label_targets`, `label_counts`, and
+`label_quota_remaining`. Use `--disable-label-quotas` only when you need to
+reproduce the old task-only sampler behavior.
+
 Optional HTML review:
 
 ```bash
@@ -84,3 +93,15 @@ are not written as SFT samples. Default proportions are:
 - `chain`: 0.15
 - `bomb_rocket`: 0.06
 - `other`: 0.11
+
+Optional HTML review:
+
+```bash
+python data_synthesis/visualize_doudizhu_grounding_sft.py \
+  --input data_synthesis/doudizhu_grounding_sft/train.parquet \
+  --output data_synthesis/doudizhu_grounding_sft/review.html \
+  --num-samples 40
+```
+
+The review page draws the normalized gold clicks on top of each screenshot and
+shows the prompt, model answer, verifier result, and full `extra_info`.

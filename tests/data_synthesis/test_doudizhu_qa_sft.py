@@ -61,3 +61,35 @@ def test_all_task_specs_generate_verifiable_responses():
         response = spec.build_response(gold)
         result = verify_response(spec, response, gold)
         assert result.ok, (spec.task_id, result)
+
+
+def test_targeted_label_buckets_and_forced_candidate_generation():
+    specs = {spec.task_id: spec for spec in build_task_specs()}
+    config = GenerationConfig(n_all=3, list_k=4)
+    rng = random.Random(11)
+
+    can_pass_state = {"current_hand": "34567", "actions": ["pass", "8"], "trace": [(1, "7")]}
+    lead_state = {"current_hand": "34567", "actions": ["3", "4"], "trace": []}
+    assert specs["I_can_pass"].label_bucket_for_state(can_pass_state, config) == "can_pass:true"
+    assert specs["I_can_pass"].label_bucket_for_state(lead_state, config) == "can_pass:false"
+
+    straight_state = {"current_hand": "3456789", "actions": ["34567"], "trace": []}
+    no_straight_state = {"current_hand": "3337788992BR", "actions": ["3"], "trace": []}
+    assert specs["F_straight"].label_bucket_for_state(straight_state, config) == "has_straight:true"
+    assert specs["F_straight"].label_bucket_for_state(no_straight_state, config) == "has_straight:false"
+
+    plane_attach_state = {"current_hand": "33344456789", "actions": ["33344456"], "trace": []}
+    no_plane_attach_state = {"current_hand": "333444", "actions": ["333444"], "trace": []}
+    assert specs["H2_plane_attachments"].label_bucket_for_state(plane_attach_state, config) == "has_plane_attachment:true"
+    assert specs["H2_plane_attachments"].label_bucket_for_state(no_plane_attach_state, config) == "has_plane_attachment:false"
+
+    small_action_state = {"current_hand": "34567", "actions": ["pass", "8"], "trace": [(1, "7")]}
+    assert specs["K_all_legal_actions"].label_bucket_for_state(small_action_state, config) == "legal_action_count:2"
+
+    gold = specs["M_candidate_legality"].build_gold_for_label(lead_state, rng, config, "candidate:illegal_pass")
+    assert gold is not None
+    assert gold.answer == {"候选动作": ["不要"], "是否合法": False}
+    assert gold.metadata["label_bucket"] == "candidate:illegal_pass"
+    assert gold.plan_aux["失败原因"] == "首发时不能选择不要"
+    result = verify_response(specs["M_candidate_legality"], specs["M_candidate_legality"].build_response(gold), gold)
+    assert result.ok, result

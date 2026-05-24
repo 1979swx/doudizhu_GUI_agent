@@ -165,6 +165,34 @@ class TaskSpec(ABC):
     def build_gold(self, state: dict[str, Any], rng: random.Random, config: GenerationConfig) -> TaskGold | None:
         raise NotImplementedError
 
+    def label_bucket_weights(self, config: GenerationConfig) -> dict[str, float]:
+        return {}
+
+    def label_bucket_for_state(self, state: dict[str, Any], config: GenerationConfig) -> str | None:
+        return None
+
+    def label_buckets_for_state(self, state: dict[str, Any], config: GenerationConfig) -> list[str]:
+        bucket = self.label_bucket_for_state(state, config)
+        return [bucket] if bucket else []
+
+    def label_bucket_for_gold(self, gold: TaskGold) -> str | None:
+        bucket = gold.metadata.get("label_bucket")
+        return str(bucket) if bucket else None
+
+    def build_gold_for_label(
+        self,
+        state: dict[str, Any],
+        rng: random.Random,
+        config: GenerationConfig,
+        label_bucket: str,
+    ) -> TaskGold | None:
+        if label_bucket not in set(self.label_buckets_for_state(state, config)):
+            return None
+        gold = self.build_gold(state, rng, config)
+        if gold is None or self.label_bucket_for_gold(gold) != label_bucket:
+            return None
+        return gold
+
     def build_plan(self, gold: TaskGold) -> str:
         return f"当前手牌有{gold.plan_aux['当前手牌']}。根据题目要求进行规则判断。因此答案如 <answer> 所示。"
 
@@ -378,6 +406,17 @@ class LongestIntervalTask(TaskSpec):
         self.min_length = min_length
         self.weight = weight
 
+    def label_bucket_weights(self, config: GenerationConfig) -> dict[str, float]:
+        if self.task_id != "F_straight":
+            return {}
+        return {"has_straight:true": 0.5, "has_straight:false": 0.5}
+
+    def label_bucket_for_state(self, state: dict[str, Any], config: GenerationConfig) -> str | None:
+        if self.task_id != "F_straight":
+            return None
+        intervals, _longest_length = longest_intervals(str(state.get("current_hand", "")), self.min_count, self.min_length)
+        return f"has_straight:{str(bool(intervals)).lower()}"
+
     def build_gold(self, state: dict[str, Any], rng: random.Random, config: GenerationConfig) -> TaskGold:
         intervals, longest_length = longest_intervals(str(state.get("current_hand", "")), self.min_count, self.min_length)
         answer = {self.answer_bool_key: bool(intervals), self.answer_list_key: intervals}
@@ -391,6 +430,7 @@ class LongestIntervalTask(TaskSpec):
             prompt,
             answer,
             plan_aux={"最长区间": intervals, "最长区间文本": interval_text(intervals), "最长长度": longest_length, "目标牌型": self.target_name},
+            metadata={"label_bucket": self.label_bucket_for_state(state, config)} if self.task_id == "F_straight" else None,
         )
 
     def build_plan(self, gold: TaskGold) -> str:
@@ -574,10 +614,29 @@ class PlaneAttachTask(ExampleByTypeTask):
     bool_keys = ("是否有飞机带单张", "是否有飞机带对子")
     example_keys = ("飞机带单张示例", "飞机带对子示例")
 
+    def label_bucket_weights(self, config: GenerationConfig) -> dict[str, float]:
+        return {"has_plane_attachment:true": 0.5, "has_plane_attachment:false": 0.5}
+
+    def _available_attachment_labels(self, hand: str) -> tuple[bool, bool]:
+        labels = {action_type_label(action) for action in playable_actions_from_hand(hand)}
+        return "飞机带单张" in labels, "飞机带对子" in labels
+
+    def label_bucket_for_state(self, state: dict[str, Any], config: GenerationConfig) -> str:
+        solo_ok, pair_ok = self._available_attachment_labels(str(state.get("current_hand", "")))
+        return f"has_plane_attachment:{str(solo_ok or pair_ok).lower()}"
+
     def build_gold(self, state: dict[str, Any], rng: random.Random, config: GenerationConfig) -> TaskGold:
         hand = str(state.get("current_hand", ""))
         solo = self._choose_example(hand, "飞机带单张", rng)
         pair = self._choose_example(hand, "飞机带对子", rng)
+        if solo and pair:
+            detail_bucket = "both"
+        elif solo:
+            detail_bucket = "solo_only"
+        elif pair:
+            detail_bucket = "pair_only"
+        else:
+            detail_bucket = "none"
         answer = {
             "是否有飞机带单张": solo is not None,
             "飞机带单张示例": example_actions_to_display([solo] if solo else []),
@@ -610,6 +669,10 @@ class PlaneAttachTask(ExampleByTypeTask):
                 "单牌数量": len(singles),
                 "对子数量": len(pairs),
                 "失败原因": failure,
+            },
+            metadata={
+                "label_bucket": f"has_plane_attachment:{str(bool(solo or pair)).lower()}",
+                "plane_attachment_detail": detail_bucket,
             },
         )
 
@@ -701,11 +764,17 @@ class CanPassTask(TaskSpec):
     task_name = "当前能否过牌"
     weight = 0.04
 
+    def label_bucket_weights(self, config: GenerationConfig) -> dict[str, float]:
+        return {"can_pass:true": 0.5, "can_pass:false": 0.5}
+
+    def label_bucket_for_state(self, state: dict[str, Any], config: GenerationConfig) -> str:
+        return f"can_pass:{str('pass' in set(state.get('actions', []))).lower()}"
+
     def build_gold(self, state: dict[str, Any], rng: random.Random, config: GenerationConfig) -> TaskGold:
         can_pass = "pass" in set(state.get("actions", []))
         answer = {"是否可以不要": can_pass}
         prompt = plan_answer_prompt("当前局面下，玩家是否可以选择不要？", '{"是否可以不要":true}')
-        return make_gold(self, state, prompt, answer)
+        return make_gold(self, state, prompt, answer, metadata={"label_bucket": self.label_bucket_for_state(state, config)})
 
     def build_plan(self, gold: TaskGold) -> str:
         hand = gold.plan_aux["当前手牌"]
@@ -732,6 +801,12 @@ class AllLegalActionsTask(TaskSpec):
     task_name = "列出全部合法动作"
     weight = 0.06
 
+    def label_bucket_weights(self, config: GenerationConfig) -> dict[str, float]:
+        return {f"legal_action_count:{count}": 1.0 for count in range(1, config.n_all + 1)}
+
+    def label_bucket_for_state(self, state: dict[str, Any], config: GenerationConfig) -> str:
+        return f"legal_action_count:{len(state.get('actions', []))}"
+
     def applies_to(self, state: dict[str, Any], config: GenerationConfig) -> bool:
         return super().applies_to(state, config) and 0 < len(state.get("actions", [])) <= config.n_all
 
@@ -740,7 +815,19 @@ class AllLegalActionsTask(TaskSpec):
         rng.shuffle(actions)
         answer = {"合法动作": [raw_action_to_display_list(action) for action in actions]}
         prompt = plan_answer_prompt("当前牌面下合法出牌动作较少。请列出全部合法动作。", '{"合法动作":[["不要"],["9"],["10"]]}')
-        return make_gold(self, state, prompt, answer, plan_aux={"N_all": config.n_all}, metadata={"n_all": config.n_all})
+        legal_action_count = len(state.get("actions", []))
+        return make_gold(
+            self,
+            state,
+            prompt,
+            answer,
+            plan_aux={"N_all": config.n_all},
+            metadata={
+                "n_all": config.n_all,
+                "legal_action_count": legal_action_count,
+                "label_bucket": self.label_bucket_for_state(state, config),
+            },
+        )
 
     def build_plan(self, gold: TaskGold) -> str:
         return (
@@ -812,33 +899,69 @@ class CandidateLegalityTask(TaskSpec):
     task_name = "判断候选动作是否合法"
     weight = 0.05
 
-    def _negative_candidates(self, state: dict[str, Any]) -> list[str]:
-        hand = str(state.get("current_hand", ""))
-        legal = set(state.get("actions", []))
-        candidates = [action for action in playable_actions_from_hand(hand) if action not in legal]
-        if "pass" not in legal:
-            candidates.append("pass")
+    def label_bucket_weights(self, config: GenerationConfig) -> dict[str, float]:
+        return {
+            "candidate:legal": 0.45,
+            "candidate:illegal_pass": 0.20,
+            "candidate:illegal_missing_cards": 0.20,
+            "candidate:illegal_rule": 0.15,
+        }
+
+    def _missing_card_candidates(self, hand: str, legal: set[str]) -> list[str]:
         counts = count_by_rank(hand)
+        candidates: list[str] = []
         for rank in INTERNAL_RANKS:
             if counts[rank] == 0:
                 candidates.append(rank)
-            elif counts[rank] < 2:
+            if counts[rank] < 2:
                 candidates.append(rank * 2)
-        unique = sorted({candidate for candidate in candidates if candidate not in legal}, key=action_sort_key)
-        return unique
+        return sorted({candidate for candidate in candidates if candidate not in legal}, key=action_sort_key)
 
-    def build_gold(self, state: dict[str, Any], rng: random.Random, config: GenerationConfig) -> TaskGold | None:
+    def _rule_negative_candidates(self, hand: str, legal: set[str]) -> list[str]:
+        return sorted({action for action in playable_actions_from_hand(hand) if action not in legal}, key=action_sort_key)
+
+    def _negative_candidates(self, state: dict[str, Any]) -> list[str]:
+        hand = str(state.get("current_hand", ""))
+        legal = set(state.get("actions", []))
+        candidates = self._rule_negative_candidates(hand, legal)
+        if "pass" not in legal:
+            candidates.append("pass")
+        candidates.extend(self._missing_card_candidates(hand, legal))
+        return sorted({candidate for candidate in candidates if candidate not in legal}, key=action_sort_key)
+
+    def _candidates_for_label_bucket(self, state: dict[str, Any], label_bucket: str) -> list[str]:
+        hand = str(state.get("current_hand", ""))
         legal = list(state.get("actions", []))
-        negatives = self._negative_candidates(state)
-        choose_positive = bool(legal) and (not negatives or rng.random() < 0.5)
-        if choose_positive:
-            candidate = rng.choice(legal)
-        elif negatives:
-            candidate = rng.choice(negatives)
-        elif legal:
-            candidate = rng.choice(legal)
-        else:
-            return None
+        legal_set = set(legal)
+        if label_bucket == "candidate:legal":
+            return sorted(legal, key=action_sort_key)
+        if label_bucket == "candidate:illegal_pass":
+            return ["pass"] if "pass" not in legal_set else []
+        if label_bucket == "candidate:illegal_missing_cards":
+            return self._missing_card_candidates(hand, legal_set)
+        if label_bucket == "candidate:illegal_rule":
+            return self._rule_negative_candidates(hand, legal_set)
+        return []
+
+    def label_buckets_for_state(self, state: dict[str, Any], config: GenerationConfig) -> list[str]:
+        buckets = [
+            bucket
+            for bucket in self.label_bucket_weights(config)
+            if self._candidates_for_label_bucket(state, bucket)
+        ]
+        return buckets
+
+    def _label_bucket_for_candidate(self, state: dict[str, Any], candidate: str, is_legal: bool) -> str:
+        if is_legal:
+            return "candidate:legal"
+        if candidate == "pass":
+            return "candidate:illegal_pass"
+        if not contains_action(str(state.get("current_hand", "")), candidate):
+            return "candidate:illegal_missing_cards"
+        return "candidate:illegal_rule"
+
+    def _make_gold_for_candidate(self, state: dict[str, Any], candidate: str, config: GenerationConfig) -> TaskGold:
+        legal = list(state.get("actions", []))
         is_legal = candidate in set(legal)
         candidate_display = raw_action_to_display_list(candidate)
         answer = {"候选动作": candidate_display, "是否合法": is_legal}
@@ -872,6 +995,7 @@ class CandidateLegalityTask(TaskSpec):
             else:
                 failure = "候选动作无法压过当前需要回应的牌"
             legal_reason = ""
+        label_bucket = self._label_bucket_for_candidate(state, candidate, is_legal)
         return make_gold(
             self,
             state,
@@ -885,8 +1009,39 @@ class CandidateLegalityTask(TaskSpec):
                 "合法原因": legal_reason,
                 "失败原因": failure,
             },
-            metadata={"candidate_action_raw": candidate, "candidate_action_display": candidate_display},
+            metadata={
+                "candidate_action_raw": candidate,
+                "candidate_action_display": candidate_display,
+                "label_bucket": label_bucket,
+                "candidate_legality_bucket": label_bucket,
+            },
         )
+
+    def build_gold_for_label(
+        self,
+        state: dict[str, Any],
+        rng: random.Random,
+        config: GenerationConfig,
+        label_bucket: str,
+    ) -> TaskGold | None:
+        candidates = self._candidates_for_label_bucket(state, label_bucket)
+        if not candidates:
+            return None
+        return self._make_gold_for_candidate(state, rng.choice(candidates), config)
+
+    def build_gold(self, state: dict[str, Any], rng: random.Random, config: GenerationConfig) -> TaskGold | None:
+        legal = list(state.get("actions", []))
+        negatives = self._negative_candidates(state)
+        choose_positive = bool(legal) and (not negatives or rng.random() < 0.5)
+        if choose_positive:
+            candidate = rng.choice(legal)
+        elif negatives:
+            candidate = rng.choice(negatives)
+        elif legal:
+            candidate = rng.choice(legal)
+        else:
+            return None
+        return self._make_gold_for_candidate(state, candidate, config)
 
     def build_plan(self, gold: TaskGold) -> str:
         if gold.answer["是否合法"]:

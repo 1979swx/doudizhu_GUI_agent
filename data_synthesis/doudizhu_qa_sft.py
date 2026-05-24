@@ -40,6 +40,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-episodes", type=int, default=100000)
     parser.add_argument("--log-every", type=int, default=1000)
     parser.add_argument(
+        "--disable-label-quotas",
+        action="store_true",
+        help="Disable within-task label quota steering for tasks F/H2/I/K/M.",
+    )
+    parser.add_argument(
         "--task-weights",
         type=str,
         default=None,
@@ -93,7 +98,12 @@ def main() -> None:
     raw_task_weights = json.loads(args.task_weights) if args.task_weights else None
     task_specs = build_task_specs()
     task_weights = normalize_weights(task_specs, raw_task_weights)
-    generation_config = GenerationConfig(language=args.language, n_all=args.n_all, list_k=args.list_k)
+    generation_config = GenerationConfig(
+        language=args.language,
+        n_all=args.n_all,
+        list_k=args.list_k,
+        label_quotas_enabled=not args.disable_label_quotas,
+    )
     env_config = make_env_config(args)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -110,6 +120,7 @@ def main() -> None:
             "image_storage": "images=[{'bytes': PNG_BYTES}]",
             "n_all": args.n_all,
             "list_k": args.list_k,
+            "label_quotas": "enabled by default for F/H2/I/K/M; use --disable-label-quotas to restore task-only quotas",
         },
         "task_weights": task_weights,
         "tasks": {spec.task_id: {"name": spec.task_name, "requires_plan": spec.requires_plan} for spec in task_specs},
