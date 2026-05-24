@@ -1,0 +1,289 @@
+{
+  "data_source": "doudizhu_end_to_end_sft",
+  "created_at": "2026-05-24T12:23:58.492563+00:00",
+  "git_commit": "e8f14608e14c1bc09c90dae433b74f8e84df092a",
+  "args": {
+    "output_dir": "data_synthesis/doudizhu_end_to_end_sft",
+    "train_samples": 1000,
+    "val_samples": 0,
+    "test_samples": 0,
+    "seed": 20260524,
+    "language": "zh",
+    "image_width": 640,
+    "image_height": 480,
+    "max_clicks": 20,
+    "max_env_steps": 30,
+    "max_bot_turns": 256,
+    "max_raw_episodes": 100000,
+    "max_api_calls": 0,
+    "max_cost": 0.0,
+    "max_consecutive_api_failures": 3,
+    "model_backend": "api",
+    "mock_policy": "first_non_pass",
+    "api_base_url": "https://api.moonshot.cn/v1",
+    "api_model": "kimi-k2.6",
+    "api_key_env": "MOONSHOT_API_KEY",
+    "api_timeout": 90.0,
+    "api_thinking": "disabled",
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "max_new_tokens": 1536,
+    "target_tokenizer_path": null,
+    "trust_remote_code": true,
+    "max_response_tokens": 1024,
+    "max_prompt_tokens": 1536,
+    "max_full_sequence_tokens": 2560,
+    "terminal_max_hand": 2,
+    "num_workers": 1,
+    "request_concurrency": 64,
+    "request_rpm": 450,
+    "request_tpm": 2700000,
+    "estimated_image_tokens": 1024,
+    "input_token_price_per_1m": 0.0,
+    "output_token_price_per_1m": 0.0,
+    "rate_limit_tier": "Tier2",
+    "retry_max_attempts": 4,
+    "retry_backoff_min_seconds": 2.0,
+    "retry_backoff_max_seconds": 60.0,
+    "resume": false,
+    "overwrite": false,
+    "log_every": 10,
+    "write_raw": true,
+    "write_raw_images": true,
+    "filter_only": true,
+    "review_samples": 40
+  },
+  "env_config": {
+    "doudizhu": {
+      "use_ray": false,
+      "language": "zh",
+      "chinese_mode": true,
+      "image_width": 640,
+      "image_height": 480,
+      "max_clicks": 20,
+      "max_bot_turns": 256,
+      "reward": {
+        "projection_valid": 0.05,
+        "click_valid": 0.05,
+        "rule_action_valid": 0.1,
+        "hand_depletion": 0.01,
+        "win": 1.0,
+        "loss": -1.0
+      }
+    }
+  },
+  "model_config": {
+    "backend": "api",
+    "api_base_url": "https://api.moonshot.cn/v1",
+    "api_model": "kimi-k2.6",
+    "api_key_env": "MOONSHOT_API_KEY",
+    "max_new_tokens": 1536,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "api_thinking": "disabled",
+    "api_timeout": 90.0
+  },
+  "prompt": {
+    "language": "zh",
+    "template_sha256": "b0335b6a9b151b8d4a3ab935551bafcf0baa1814501d04d93bdbe2f66252b2ff",
+    "template_zh_sha256": "b0335b6a9b151b8d4a3ab935551bafcf0baa1814501d04d93bdbe2f66252b2ff",
+    "template_en_sha256": "10fe73b501022e9255d430bdb78698acf263c897cedcce20a5a7f0e6f9988936"
+  },
+  "rate_limit": {
+    "tier": "Tier2",
+    "request_concurrency": 64,
+    "request_rpm": 450,
+    "request_tpm": 2700000,
+    "estimated_image_tokens": 1024,
+    "http_429s": 0,
+    "backoff_sleep_sec": 0.0
+  },
+  "api_totals": {
+    "api_calls": 0,
+    "api_successes": 0,
+    "api_failures": 0,
+    "api_retries": 0,
+    "http_429s": 0,
+    "backoff_sleep_sec": 0.0,
+    "estimated_cost": 0.0
+  },
+  "cost_config": {
+    "max_cost": 0.0,
+    "input_token_price_per_1m": 0.0,
+    "output_token_price_per_1m": 0.0,
+    "estimated_cost": 0.0
+  },
+  "filter_config": {
+    "episode_acceptance": "terminal_player0_num_cards_left_le_threshold",
+    "terminal_player_id": 0,
+    "terminal_max_player0_hand": 2,
+    "strict_win_equivalent_terminal_max_hand": 0,
+    "episode_normal_end": true,
+    "projection_valid": 1,
+    "click_valid_ratio": 1.0,
+    "rule_action_valid": 1.0,
+    "fallback_used": false,
+    "action_tag_raw_equals_game_action": true,
+    "max_response_tokens": 1024,
+    "max_prompt_tokens": 1536,
+    "max_full_sequence_tokens": 2560
+  },
+  "format": {
+    "parquet_columns": [
+      "data_source",
+      "prompt",
+      "question",
+      "images",
+      "answer",
+      "ability",
+      "reward_model",
+      "extra_info"
+    ],
+    "image_storage": "images=[{'bytes': PNG_BYTES}]",
+    "response": "five XML tags: <plan>, <action>, <tool_call>, <chat>, <memory>",
+    "action_contract": "list of display cards: [pass], [3, 3], [10, J], [BJ, RJ]"
+  },
+  "tokenizer": {
+    "target_tokenizer_path": null,
+    "token_length_source": "approx_chars_div4"
+  },
+  "splits": {
+    "train": {
+      "split": "train",
+      "episode_metrics": {
+        "num_episodes": 485,
+        "num_completed_episodes": 484,
+        "num_won_episodes": 51,
+        "num_terminal_qualified_episodes": 78,
+        "win_rate": 0.10537190082644628,
+        "terminal_qualified_rate": 0.16115702479338842,
+        "terminal_max_player0_hand": 2,
+        "avg_final_player0_num_cards_left": 8.816115702479339,
+        "final_player0_num_cards_left_distribution": {
+          "14": 34,
+          "6": 19,
+          "11": 44,
+          "4": 15,
+          "17": 11,
+          "0": 51,
+          "18": 3,
+          "1": 10,
+          "8": 32,
+          "10": 36,
+          "12": 52,
+          "13": 25,
+          "3": 16,
+          "9": 52,
+          "19": 1,
+          "2": 17,
+          "7": 19,
+          "16": 20,
+          "5": 11,
+          "15": 16
+        },
+        "avg_episode_length": 16.74586776859504,
+        "median_episode_length": 17.0,
+        "truncated_rate": 0.002061855670103093,
+        "bot_limit_rate": 0.0,
+        "api_abort_rate": 0.0,
+        "avg_payoff_player0": 0.10537190082644628,
+        "winner_id_distribution": {
+          "1": 213,
+          "2": 220,
+          "0": 51
+        }
+      },
+      "step_metrics": {
+        "num_steps": 8111,
+        "projection_valid_rate": 0.9208482307976822,
+        "click_valid_ratio_mean": 0.8478738435150273,
+        "click_valid_all_rate": 0.795561035758323,
+        "rule_action_valid_rate": 0.6371146732429099,
+        "fallback_rate": 0.36288532675709,
+        "action_tag_parse_rate": 0.9316976944889656,
+        "action_match_rate": 0.5800246609124537,
+        "accepted_steps": 970,
+        "accepted_step_rate": 0.11959067932437431,
+        "response_tokens_avg": 263.51732215509804,
+        "response_tokens_p50": 223.0,
+        "full_sequence_tokens_avg": 650.2825792134139,
+        "full_sequence_tokens_p50": 607.0
+      },
+      "rejection_counts": {
+        "terminal_player0_hand_gt_threshold": 6640,
+        "click_invalid": 1659,
+        "no_submit": 996,
+        "rule_invalid": 2944,
+        "fallback_used": 2943,
+        "action_mismatch": 3407,
+        "projection_invalid": 642,
+        "tool_call_empty": 567,
+        "action_tag_parse_fail": 554,
+        "tool_call_parse_fail": 74,
+        "episode_truncated": 6,
+        "api_invalid_request": 1
+      },
+      "accepted_distribution": {
+        "action_category": {
+          "solo": 509,
+          "pair": 172,
+          "trio": 30,
+          "chain": 25,
+          "bomb_rocket": 13,
+          "pass": 220,
+          "other": 1
+        },
+        "turn_type": {
+          "lead": 255,
+          "respond": 715
+        },
+        "game_phase": {
+          "early": 430,
+          "mid": 241,
+          "late": 299
+        },
+        "hand_length_bucket": {
+          "15-20": 330,
+          "11-14": 183,
+          "7-10": 158,
+          "4-6": 130,
+          "1-3": 169
+        },
+        "legal_action_count_bucket": {
+          ">100": 12,
+          "4-10": 412,
+          "2-3": 283,
+          "11-30": 73,
+          "31-100": 39,
+          "1": 151
+        },
+        "opponent_min_card_count_bucket": {
+          "11-20": 285,
+          "6-10": 241,
+          "3-5": 231,
+          "2": 99,
+          "1": 114
+        },
+        "pass_legal": {
+          "false": 255,
+          "true": 715
+        },
+        "bomb_or_rocket_available": {
+          "true": 188,
+          "false": 782
+        }
+      },
+      "accepted_episode_distribution": {
+        "final_player0_num_cards_left": {
+          "0": 628,
+          "1": 142,
+          "2": 200
+        },
+        "prior_context": {
+          "prior_clean": 156,
+          "prior_dirty": 814
+        }
+      }
+    }
+  }
+}

@@ -1,9 +1,9 @@
 {
   "args": {
     "output_dir": "data_synthesis/doudizhu_grounding_sft",
-    "train_samples": 20000,
-    "val_samples": 3000,
-    "test_samples": 3000,
+    "train_samples": 15000,
+    "val_samples": 1500,
+    "test_samples": 1500,
     "seed": 20260521,
     "language": "zh",
     "image_width": 640,
@@ -30,18 +30,18 @@
   "splits": {
     "train": {
       "split": "train",
-      "target_samples": 20000,
-      "accepted_samples": 20000,
-      "episodes_used": 15390,
+      "target_samples": 15000,
+      "accepted_samples": 15000,
+      "episodes_used": 11427,
       "seed_start": 20260521,
       "quota_targets": {
-        "pass": 1000,
-        "solo": 3600,
-        "pair": 4400,
-        "trio": 3600,
-        "chain": 3600,
-        "bomb_rocket": 1000,
-        "other": 2800
+        "pass": 750,
+        "solo": 2700,
+        "pair": 3300,
+        "trio": 2700,
+        "chain": 2700,
+        "bomb_rocket": 750,
+        "other": 2100
       },
       "quota_remaining": {
         "pass": 0,
@@ -53,36 +53,36 @@
         "other": 0
       },
       "category_counts": {
-        "pair": 4400,
-        "pass": 1000,
-        "solo": 3600,
-        "chain": 3600,
-        "bomb_rocket": 1000,
-        "trio": 3600,
-        "other": 2800
+        "pair": 3300,
+        "pass": 750,
+        "solo": 2700,
+        "chain": 2700,
+        "bomb_rocket": 750,
+        "trio": 2700,
+        "other": 2100
       },
       "source_counts": {
-        "quota_sample": 20000
+        "quota_sample": 15000
       },
       "rejection_counts": {},
       "skip_counts": {
-        "quota_full_for_legal_categories": 221362
+        "quota_full_for_legal_categories": 163792
       }
     },
     "val": {
       "split": "val",
-      "target_samples": 3000,
-      "accepted_samples": 3000,
-      "episodes_used": 2264,
+      "target_samples": 1500,
+      "accepted_samples": 1500,
+      "episodes_used": 1086,
       "seed_start": 30260521,
       "quota_targets": {
-        "pass": 150,
-        "solo": 540,
-        "pair": 660,
-        "trio": 540,
-        "chain": 540,
-        "bomb_rocket": 150,
-        "other": 420
+        "pass": 75,
+        "solo": 270,
+        "pair": 330,
+        "trio": 270,
+        "chain": 270,
+        "bomb_rocket": 75,
+        "other": 210
       },
       "quota_remaining": {
         "pass": 0,
@@ -94,36 +94,36 @@
         "other": 0
       },
       "category_counts": {
-        "pair": 660,
-        "pass": 150,
-        "chain": 540,
-        "solo": 540,
-        "bomb_rocket": 150,
-        "trio": 540,
-        "other": 420
+        "pair": 330,
+        "pass": 75,
+        "chain": 270,
+        "solo": 270,
+        "bomb_rocket": 75,
+        "trio": 270,
+        "other": 210
       },
       "source_counts": {
-        "quota_sample": 3000
+        "quota_sample": 1500
       },
       "rejection_counts": {},
       "skip_counts": {
-        "quota_full_for_legal_categories": 32802
+        "quota_full_for_legal_categories": 15513
       }
     },
     "test": {
       "split": "test",
-      "target_samples": 3000,
-      "accepted_samples": 3000,
-      "episodes_used": 2352,
+      "target_samples": 1500,
+      "accepted_samples": 1500,
+      "episodes_used": 1175,
       "seed_start": 40260521,
       "quota_targets": {
-        "pass": 150,
-        "solo": 540,
-        "pair": 660,
-        "trio": 540,
-        "chain": 540,
-        "bomb_rocket": 150,
-        "other": 420
+        "pass": 75,
+        "solo": 270,
+        "pair": 330,
+        "trio": 270,
+        "chain": 270,
+        "bomb_rocket": 75,
+        "other": 210
       },
       "quota_remaining": {
         "pass": 0,
@@ -135,20 +135,20 @@
         "other": 0
       },
       "category_counts": {
-        "pair": 660,
-        "pass": 150,
-        "solo": 540,
-        "chain": 540,
-        "bomb_rocket": 150,
-        "trio": 540,
-        "other": 420
+        "pair": 330,
+        "pass": 75,
+        "solo": 270,
+        "chain": 270,
+        "bomb_rocket": 75,
+        "trio": 270,
+        "other": 210
       },
       "source_counts": {
-        "quota_sample": 3000
+        "quota_sample": 1500
       },
       "rejection_counts": {},
       "skip_counts": {
-        "quota_full_for_legal_categories": 34009
+        "quota_full_for_legal_categories": 17009
       }
     }
   }
