@@ -4,7 +4,7 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from agent_system.environments.env_manager import DoudizhuEnvironmentManager, DoudizhuGroundingEnvironmentManager
-from agent_system.environments.env_package.doudizhu import build_doudizhu_envs, doudizhu_projection
+from agent_system.environments.env_package.doudizhu import build_doudizhu_envs, doudizhu_projection, parse_doudizhu_action_tag
 from agent_system.environments.env_package.doudizhu.core.base import Card
 from agent_system.environments.env_package.doudizhu.envs import DoudizhuSingleEnv
 from agent_system.environments.env_package.doudizhu.renderer import DoudizhuRenderer
@@ -12,7 +12,7 @@ from agent_system.environments.env_package.doudizhu_grounding import build_doudi
 
 TOOL_CALL_RESPONSE = (
     "<plan>plan</plan>"
-    "<action>3</action>"
+    "<action>[3]</action>"
     "<tool_call>left_click([55,870],[424,758])</tool_call>"
     "<chat>Let's press them.</chat>"
     "<memory>I led with a low card.</memory>"
@@ -20,7 +20,7 @@ TOOL_CALL_RESPONSE = (
 LEGACY_ACTION_RESPONSE = "<plan>plan</plan><action>[[55, 870], [424, 758]]</action><chat>Let's press them.</chat><memory>I led with a low card.</memory>"
 LEGACY_JSON_TOOL_CALL_RESPONSE = (
     "<plan>plan</plan>"
-    "<action>3</action>"
+    "<action>[3]</action>"
     '<tool_call>[{"name":"computer_use","arguments":{"action":"left_click","coordinate":[55,870]}},'
     '{"name":"computer_use","arguments":{"action":"left_click","coordinate":[424,758]}}]</tool_call>'
     "<chat>Let's press them.</chat>"
@@ -28,7 +28,7 @@ LEGACY_JSON_TOOL_CALL_RESPONSE = (
 )
 MEMORY_WITH_IMAGE_TOKENS_RESPONSE = (
     "<plan>plan</plan>"
-    "<action>3</action>"
+    "<action>[3]</action>"
     "<tool_call>left_click([55,870],[424,758])</tool_call>"
     "<chat>Let's press them.</chat>"
     "<memory>I saw <image> and <|vision_start|><|image_pad|><|vision_end|> in the prompt.</memory>"
@@ -98,17 +98,39 @@ def _oracle_clicks_for_target(env, target_action):
     return clicks
 
 
+def test_doudizhu_action_tag_parser_list_contract():
+    cases = [
+        ("[pass]", True, "pass", ["pass"], "[pass]"),
+        ("[不要]", True, "pass", ["pass"], "[pass]"),
+        ("[3, 3]", True, "33", ["3", "3"], "[3, 3]"),
+        ("[9, 10, J, Q, K]", True, "9TJQK", ["9", "10", "J", "Q", "K"], "[9, 10, J, Q, K]"),
+        ('["BJ", "RJ"]', True, "BR", ["BJ", "RJ"], "[BJ, RJ]"),
+        ("3", False, "", [], ""),
+        ("[3 3]", False, "", [], ""),
+        ("[pass, 3]", False, "", [], ""),
+        ("[[55, 870]]", False, "", [], ""),
+    ]
+
+    for text, expected_ok, expected_raw, expected_cards, expected_normalized in cases:
+        parsed = parse_doudizhu_action_tag(text)
+        assert parsed["parse_ok"] is expected_ok
+        assert parsed["raw"] == expected_raw
+        assert parsed["cards"] == expected_cards
+        assert parsed["normalized_text"] == expected_normalized
+
+
 def test_doudizhu_projection_valid_and_invalid_cases():
     actions, valids = doudizhu_projection(
         [
             TOOL_CALL_RESPONSE,
             LEGACY_ACTION_RESPONSE,
             LEGACY_JSON_TOOL_CALL_RESPONSE,
-            "<plan>plan</plan><action>3</action><tool_call>left_click([-1,100])</tool_call><chat>hi</chat><memory>m</memory>",
-            "<plan>plan</plan><action>3</action><tool_call>not-json</tool_call><chat>hi</chat><memory>m</memory>",
+            "<plan>plan</plan><action>3</action><tool_call>left_click([55,870])</tool_call><chat>hi</chat><memory>m</memory>",
+            "<plan>plan</plan><action>[3]</action><tool_call>left_click([-1,100])</tool_call><chat>hi</chat><memory>m</memory>",
+            "<plan>plan</plan><action>[3]</action><tool_call>not-json</tool_call><chat>hi</chat><memory>m</memory>",
             "<plan>plan</plan><action>[[100, 100]]</action><memory>m</memory>",
             (
-                "<plan>plan</plan><action>3</action>"
+                "<plan>plan</plan><action>[3]</action>"
                 '<tool_call>{"name":"computer_use","arguments":{"action":"key","coordinate":[55,870]}}</tool_call>'
                 "<chat>hi</chat><memory>m</memory>"
             ),
@@ -116,12 +138,19 @@ def test_doudizhu_projection_valid_and_invalid_cases():
         max_clicks=8,
     )
 
-    assert valids == [1, 0, 0, 0, 0, 0, 0]
+    assert valids == [1, 0, 0, 0, 0, 0, 0, 0]
     assert actions[0]["clicks"] == [[55.0, 870.0], [424.0, 758.0]]
     assert actions[0]["chat"] == "Let's press them."
     assert actions[0]["semantic_action"] == "3"
+    assert actions[0]["raw_action_text"] == "[3]"
+    assert actions[0]["normalized_action_text"] == "[3]"
+    assert actions[0]["action_tag_parse_ok"] is True
+    assert actions[0]["action_tag_raw"] == "3"
+    assert actions[0]["action_tag_cards"] == ["3"]
     assert actions[0]["tool_calling"] == 2
     assert actions[1]["clicks"] == []
+    assert actions[3]["clicks"] == [[55.0, 870.0]]
+    assert actions[3]["action_tag_parse_ok"] is False
 
 
 def test_doudizhu_grounding_projection_requires_tool_call_only():
