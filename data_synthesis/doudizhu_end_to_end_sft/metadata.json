@@ -1,7 +1,7 @@
 {
   "data_source": "doudizhu_end_to_end_sft",
-  "created_at": "2026-05-24T12:23:58.492563+00:00",
-  "git_commit": "e8f14608e14c1bc09c90dae433b74f8e84df092a",
+  "created_at": "2026-05-24T13:10:52.778462+00:00",
+  "git_commit": "41d4c4d2c562b24901f4ae1c2325e1df209edfdc",
   "args": {
     "output_dir": "data_synthesis/doudizhu_end_to_end_sft",
     "train_samples": 1000,
@@ -28,7 +28,7 @@
     "temperature": 0.6,
     "top_p": 0.95,
     "max_new_tokens": 1536,
-    "target_tokenizer_path": null,
+    "target_tokenizer_path": "checkpoints/sft/qwen3_5_4B_doudizhu_grounding/global_step_400",
     "trust_remote_code": true,
     "max_response_tokens": 1024,
     "max_prompt_tokens": 1536,
@@ -144,8 +144,8 @@
     "action_contract": "list of display cards: [pass], [3, 3], [10, J], [BJ, RJ]"
   },
   "tokenizer": {
-    "target_tokenizer_path": null,
-    "token_length_source": "approx_chars_div4"
+    "target_tokenizer_path": "checkpoints/sft/qwen3_5_4B_doudizhu_grounding/global_step_400",
+    "token_length_source": "checkpoints/sft/qwen3_5_4B_doudizhu_grounding/global_step_400"
   },
   "splits": {
     "train": {
@@ -202,12 +202,12 @@
         "fallback_rate": 0.36288532675709,
         "action_tag_parse_rate": 0.9316976944889656,
         "action_match_rate": 0.5800246609124537,
-        "accepted_steps": 970,
-        "accepted_step_rate": 0.11959067932437431,
-        "response_tokens_avg": 263.51732215509804,
-        "response_tokens_p50": 223.0,
-        "full_sequence_tokens_avg": 650.2825792134139,
-        "full_sequence_tokens_p50": 607.0
+        "accepted_steps": 882,
+        "accepted_step_rate": 0.10874121563309086,
+        "response_tokens_avg": 754.5718160522747,
+        "response_tokens_p50": 629.0,
+        "full_sequence_tokens_avg": 1929.3764024164714,
+        "full_sequence_tokens_p50": 1803.0
       },
       "rejection_counts": {
         "terminal_player0_hand_gt_threshold": 6640,
@@ -216,6 +216,8 @@
         "rule_invalid": 2944,
         "fallback_used": 2943,
         "action_mismatch": 3407,
+        "response_too_long": 1559,
+        "full_sequence_too_long": 908,
         "projection_invalid": 642,
         "tool_call_empty": 567,
         "action_tag_parse_fail": 554,
@@ -225,63 +227,63 @@
       },
       "accepted_distribution": {
         "action_category": {
-          "solo": 509,
-          "pair": 172,
-          "trio": 30,
-          "chain": 25,
+          "solo": 458,
+          "pair": 160,
+          "trio": 23,
+          "chain": 17,
           "bomb_rocket": 13,
-          "pass": 220,
+          "pass": 210,
           "other": 1
         },
         "turn_type": {
-          "lead": 255,
-          "respond": 715
+          "lead": 238,
+          "respond": 644
         },
         "game_phase": {
-          "early": 430,
-          "mid": 241,
-          "late": 299
+          "early": 379,
+          "mid": 220,
+          "late": 283
         },
         "hand_length_bucket": {
-          "15-20": 330,
-          "11-14": 183,
-          "7-10": 158,
-          "4-6": 130,
-          "1-3": 169
+          "15-20": 292,
+          "11-14": 158,
+          "7-10": 149,
+          "4-6": 120,
+          "1-3": 163
         },
         "legal_action_count_bucket": {
-          ">100": 12,
-          "4-10": 412,
-          "2-3": 283,
-          "11-30": 73,
-          "31-100": 39,
-          "1": 151
+          ">100": 11,
+          "4-10": 375,
+          "2-3": 255,
+          "11-30": 66,
+          "31-100": 29,
+          "1": 146
         },
         "opponent_min_card_count_bucket": {
-          "11-20": 285,
-          "6-10": 241,
-          "3-5": 231,
-          "2": 99,
-          "1": 114
+          "11-20": 252,
+          "6-10": 218,
+          "3-5": 216,
+          "2": 91,
+          "1": 105
         },
         "pass_legal": {
-          "false": 255,
-          "true": 715
+          "false": 238,
+          "true": 644
         },
         "bomb_or_rocket_available": {
-          "true": 188,
-          "false": 782
+          "true": 164,
+          "false": 718
         }
       },
       "accepted_episode_distribution": {
         "final_player0_num_cards_left": {
-          "0": 628,
-          "1": 142,
-          "2": 200
+          "0": 570,
+          "1": 130,
+          "2": 182
         },
         "prior_context": {
-          "prior_clean": 156,
-          "prior_dirty": 814
+          "prior_clean": 140,
+          "prior_dirty": 742
         }
       }
     }

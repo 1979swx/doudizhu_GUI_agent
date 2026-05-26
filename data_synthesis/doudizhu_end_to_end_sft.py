@@ -70,6 +70,8 @@ class TokenLengths:
     response_tokens: int
     full_sequence_tokens: int
     source: str
+    prompt_text_tokens: int = 0
+    prompt_image_tokens: int = 0
 
 
 @dataclass
@@ -208,11 +210,14 @@ class TokenCounter:
 
     def __init__(self, tokenizer_path: str | None, trust_remote_code: bool = True, enable_thinking: bool = False):
         self.tokenizer = None
+        self.processor = None
         self.source = "approx_chars_div4"
         self.enable_thinking = bool(enable_thinking)
         self.lock = threading.Lock()
+        self.image_token_cache: dict[tuple[int, int], int] = {}
         if tokenizer_path:
             self.tokenizer = self._load_tokenizer(tokenizer_path, trust_remote_code=trust_remote_code)
+            self.processor = self._load_processor(tokenizer_path, trust_remote_code=trust_remote_code)
             self.source = str(tokenizer_path)
 
     @staticmethod
@@ -231,6 +236,18 @@ class TokenCounter:
                 pass
             raise tokenizer_error
 
+    @staticmethod
+    def _load_processor(path: str, trust_remote_code: bool):
+        from transformers import AutoProcessor
+
+        try:
+            processor = AutoProcessor.from_pretrained(path, trust_remote_code=trust_remote_code, use_fast=True)
+        except Exception:  # noqa: BLE001
+            return None
+        if getattr(processor, "image_processor", None) is None:
+            return None
+        return processor
+
     def _approx_count(self, text: str) -> int:
         text = text or ""
         return max(1 if text else 0, (len(text) + 3) // 4)
@@ -241,9 +258,95 @@ class TokenCounter:
         with self.lock:
             return len(self.tokenizer.encode(text or "", add_special_tokens=False))
 
-    def count_messages(self, messages: list[dict[str, Any]], *, add_generation_prompt: bool) -> int:
+    @staticmethod
+    def _tokenized_length(tokenized: Any) -> int:
+        if hasattr(tokenized, "get"):
+            input_ids = tokenized.get("input_ids")
+            if input_ids is not None:
+                return TokenCounter._tokenized_length(input_ids)
+        if hasattr(tokenized, "tolist"):
+            tokenized = tokenized.tolist()
+        if isinstance(tokenized, (list, tuple)):
+            if not tokenized:
+                return 0
+            first = tokenized[0]
+            if hasattr(first, "tolist"):
+                first = first.tolist()
+            if isinstance(first, (list, tuple)):
+                return len(first)
+            return len(tokenized)
+        return len(tokenized)
+
+    def _chat_text(self, messages: list[dict[str, Any]], *, add_generation_prompt: bool) -> str:
+        if self.tokenizer is None:
+            return json.dumps(messages, ensure_ascii=False)
+        try:
+            with self.lock:
+                return self.tokenizer.apply_chat_template(
+                    messages,
+                    add_generation_prompt=add_generation_prompt,
+                    tokenize=False,
+                    enable_thinking=self.enable_thinking,
+                )
+        except TypeError:
+            with self.lock:
+                return self.tokenizer.apply_chat_template(
+                    messages,
+                    add_generation_prompt=add_generation_prompt,
+                    tokenize=False,
+                )
+
+    def _image_tokens_for_image(self, image: Any) -> int:
+        if self.processor is None:
+            return 0
+        if isinstance(image, np.ndarray):
+            image = Image.fromarray(image.astype(np.uint8)).convert("RGB")
+        elif not isinstance(image, Image.Image):
+            return 0
+        cache_key = (int(image.width), int(image.height))
+        cached = self.image_token_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        with self.lock:
+            image_inputs = self.processor.image_processor([image], return_tensors="pt")
+        image_grid_thw = image_inputs.get("image_grid_thw")
+        if image_grid_thw is None:
+            return 0
+        merge_size = int(getattr(self.processor.image_processor, "merge_size", 1))
+        count = int(image_grid_thw[0].prod().item() // max(1, merge_size**2))
+        self.image_token_cache[cache_key] = count
+        return count
+
+    def image_token_counts(self, images: list[Any] | None) -> list[int]:
+        return [self._image_tokens_for_image(image) for image in images or []]
+
+    def _vision_tokens(self) -> tuple[str, str, str]:
+        if self.processor is None:
+            return "<|vision_start|>", "<|image_pad|>", "<|vision_end|>"
+        tokenizer = getattr(self.processor, "tokenizer", None) or self.tokenizer
+        start = getattr(self.processor, "vision_start_token", None) or getattr(tokenizer, "vision_bos_token", None) or "<|vision_start|>"
+        image = getattr(self.processor, "image_token", None) or getattr(tokenizer, "image_token", None) or "<|image_pad|>"
+        end = getattr(self.processor, "vision_end_token", None) or getattr(tokenizer, "vision_eos_token", None) or "<|vision_end|>"
+        return str(start), str(image), str(end)
+
+    def _expand_image_placeholders(self, text: str, image_token_counts: list[int]) -> tuple[str, int]:
+        if not image_token_counts:
+            return text, 0
+        start, image_token, end = self._vision_tokens()
+        total_image_tokens = 0
+        expanded = text
+        for count in image_token_counts:
+            total_image_tokens += int(count)
+            expanded = expanded.replace("<image>", start + image_token * int(count) + end, 1)
+        return expanded, total_image_tokens
+
+    def count_messages(self, messages: list[dict[str, Any]], *, add_generation_prompt: bool, image_token_counts: list[int] | None = None) -> int:
         if self.tokenizer is None:
             return self._approx_count(json.dumps(messages, ensure_ascii=False))
+        if image_token_counts:
+            text = self._chat_text(messages, add_generation_prompt=add_generation_prompt)
+            expanded, _image_tokens = self._expand_image_placeholders(text, image_token_counts)
+            return self.count_text(expanded)
         try:
             with self.lock:
                 token_ids = self.tokenizer.apply_chat_template(
@@ -252,7 +355,7 @@ class TokenCounter:
                     tokenize=True,
                     enable_thinking=self.enable_thinking,
                 )
-            return len(token_ids)
+            return self._tokenized_length(token_ids)
         except TypeError:
             with self.lock:
                 token_ids = self.tokenizer.apply_chat_template(
@@ -260,19 +363,24 @@ class TokenCounter:
                     add_generation_prompt=add_generation_prompt,
                     tokenize=True,
                 )
-            return len(token_ids)
+            return self._tokenized_length(token_ids)
         except Exception:  # noqa: BLE001
             text = "\n".join(str(message.get("content", "")) for message in messages)
             return self.count_text(text)
 
-    def lengths(self, prompt: str, answer: str) -> TokenLengths:
+    def lengths(self, prompt: str, answer: str, images: list[Any] | None = None) -> TokenLengths:
         prompt_messages = [{"role": "user", "content": prompt}]
         full_messages = prompt_messages + [{"role": "assistant", "content": answer}]
+        image_counts = self.image_token_counts(images)
+        prompt_text_tokens = self.count_messages(prompt_messages, add_generation_prompt=True)
+        prompt_tokens = self.count_messages(prompt_messages, add_generation_prompt=True, image_token_counts=image_counts)
         return TokenLengths(
-            prompt_tokens=self.count_messages(prompt_messages, add_generation_prompt=True),
+            prompt_tokens=prompt_tokens,
             response_tokens=self.count_text(answer),
-            full_sequence_tokens=self.count_messages(full_messages, add_generation_prompt=False),
+            full_sequence_tokens=self.count_messages(full_messages, add_generation_prompt=False, image_token_counts=image_counts),
             source=self.source,
+            prompt_text_tokens=prompt_text_tokens,
+            prompt_image_tokens=sum(image_counts),
         )
 
 
@@ -1133,6 +1241,40 @@ def is_accepted_step(step: dict[str, Any], episode: dict[str, Any], filter_confi
     return len(filter_reasons_for_step(step, episode, filter_config)) == 0
 
 
+def image_for_step(output_dir: Path, step: dict[str, Any]) -> Image.Image | None:
+    image_path = resolve_raw_image_path(output_dir, str(step.get("image_path", "")))
+    if not image_path.exists():
+        return None
+    try:
+        return Image.open(image_path).convert("RGB")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def refresh_step_token_lengths(steps: list[dict[str, Any]], token_counter: TokenCounter, output_dir: Path) -> list[dict[str, Any]]:
+    refreshed: list[dict[str, Any]] = []
+    for step in steps:
+        record = dict(step)
+        answer = str(record.get("normalized_answer") or record.get("raw_response") or "")
+        image = image_for_step(output_dir, record)
+        token_lengths = token_counter.lengths(str(record.get("prompt", "")), answer, images=[image] if image is not None else None)
+        tokens = dict(record.get("tokens", {}))
+        tokens.update(
+            {
+                "prompt_tokens_target_model": token_lengths.prompt_tokens,
+                "prompt_text_tokens_target_model": token_lengths.prompt_text_tokens,
+                "prompt_image_tokens_target_model": token_lengths.prompt_image_tokens,
+                "response_tokens_target_model": token_lengths.response_tokens,
+                "full_sequence_tokens_target_model": token_lengths.full_sequence_tokens,
+                "tokenizer": token_lengths.source,
+                "response_tokens_le_512": token_lengths.response_tokens <= 512,
+            }
+        )
+        record["tokens"] = tokens
+        refreshed.append(record)
+    return refreshed
+
+
 def step_distribution_tags(step: dict[str, Any]) -> dict[str, str]:
     state = step.get("state_before", {})
     legal_actions = list(state.get("legal_actions", []))
@@ -1229,6 +1371,8 @@ def make_step_record(
         "state_before": compact_state(state_before),
         "tokens": {
             "prompt_tokens_target_model": token_lengths.prompt_tokens,
+            "prompt_text_tokens_target_model": token_lengths.prompt_text_tokens,
+            "prompt_image_tokens_target_model": token_lengths.prompt_image_tokens,
             "response_tokens_target_model": token_lengths.response_tokens,
             "full_sequence_tokens_target_model": token_lengths.full_sequence_tokens,
             "tokenizer": token_lengths.source,
@@ -1368,7 +1512,7 @@ def run_episode(
             consecutive_api_failures += 1
             projected_action = doudizhu_projection([""], max_clicks=args.max_clicks)[0][0]
             answer = ""
-            token_lengths = token_counter.lengths(prompt, answer)
+            token_lengths = token_counter.lengths(prompt, answer, images=[obs])
             step_record = make_step_record(
                 split=split,
                 episode_seed=episode_seed,
@@ -1402,7 +1546,7 @@ def run_episode(
         projected_actions, _valids = doudizhu_projection([api_result.response], max_clicks=args.max_clicks)
         projected_action = projected_actions[0]
         normalized = normalized_answer(api_result.response, projected_action.get("normalized_action_text", ""))
-        token_lengths = token_counter.lengths(prompt, normalized)
+        token_lengths = token_counter.lengths(prompt, normalized, images=[obs])
         next_obs, reward, done, env_info = env.step(projected_action)
         response_memory = projected_action.get("memory", "")
         memory_after = memory_before
@@ -1672,6 +1816,8 @@ def rows_for_accepted_steps(
             "action_match": action_parse.get("raw") == env_info.get("game_action"),
             "response_tokens_target_model": int(step.get("tokens", {}).get("response_tokens_target_model", 0)),
             "prompt_tokens_target_model": int(step.get("tokens", {}).get("prompt_tokens_target_model", 0)),
+            "prompt_text_tokens_target_model": int(step.get("tokens", {}).get("prompt_text_tokens_target_model", 0)),
+            "prompt_image_tokens_target_model": int(step.get("tokens", {}).get("prompt_image_tokens_target_model", 0)),
             "full_sequence_tokens_target_model": int(step.get("tokens", {}).get("full_sequence_tokens_target_model", 0)),
             "selected_before_pass": bool(step.get("verifier_aux", {}).get("selected_before_pass", False)),
         }
@@ -1861,9 +2007,8 @@ def build_split_outputs(
     filter_config: FilterConfig,
     write_outputs: bool = True,
 ) -> SplitBuildResult:
-    del token_counter
     steps_path, episodes_path = episode_paths(args.output_dir, split)
-    steps = load_jsonl(steps_path)
+    steps = refresh_step_token_lengths(load_jsonl(steps_path), token_counter, args.output_dir)
     episodes = enrich_episodes_with_terminal_counts(load_jsonl(episodes_path), steps)
     episodes_by_seed = {int(record["episode_seed"]): record for record in episodes}
     rows = rows_for_accepted_steps(

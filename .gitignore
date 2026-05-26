@@ -132,3 +132,6 @@ data/
 .tmp
 *ports
 
+# data_synthesis
+data_synthesis/doudizhu_end_to_end_sft/raw/train_steps.jsonl
+

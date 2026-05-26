@@ -2,6 +2,7 @@ from agent_system.environments.env_package.doudizhu.projection import parse_doud
 from data_synthesis.doudizhu_end_to_end_sft import (
     DOUDIZHU_VISUAL_TEMPLATE_ZH,
     FilterConfig,
+    TokenCounter,
     build_prompt,
     filter_reasons_for_step,
     first_episode_index,
@@ -71,6 +72,25 @@ def test_filter_with_zero_terminal_remaining_matches_strict_win_mode():
     step = _accepted_step()
     episode = {"won": False, "normal_end": True, "final_player0_num_cards_left": 2}
     assert "terminal_player0_hand_gt_threshold" in filter_reasons_for_step(step, episode, FilterConfig(terminal_max_player0_hand=0))
+
+
+def test_filter_rejects_prompt_too_long():
+    step = _accepted_step()
+    step["tokens"]["prompt_tokens_target_model"] = 2048
+    episode = {"won": True, "normal_end": True, "final_player0_num_cards_left": 0}
+    assert "prompt_too_long" in filter_reasons_for_step(step, episode, FilterConfig(max_prompt_tokens=1536))
+
+
+def test_tokenized_length_uses_input_ids_for_batch_encoding_like_objects():
+    tokenized = {"input_ids": [1, 2, 3, 4], "attention_mask": [1, 1, 1, 1]}
+    assert TokenCounter._tokenized_length(tokenized) == 4
+
+
+def test_expand_image_placeholders_replaces_with_vision_tokens():
+    counter = TokenCounter(None)
+    expanded, image_tokens = counter._expand_image_placeholders("a<image>b", [3])
+    assert image_tokens == 3
+    assert expanded == "a<|vision_start|><|image_pad|><|image_pad|><|image_pad|><|vision_end|>b"
 
 
 def test_filter_reports_multiple_rejection_reasons():

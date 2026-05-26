@@ -7,9 +7,9 @@ if [[ $# -gt 0 && "$1" != *=* && "$1" != +* ]]; then
     shift
 fi
 
-MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-4B}"
-PROJECT_NAME="${PROJECT_NAME:-verl_agent_doudizhu_qwen3_5}"
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-grpo_qwen3_5_4b_doudizhu_zh}"
+MODEL_PATH="${MODEL_PATH:-checkpoints/sft/qwen3_5_4B_doudizhu_grounding_qa_end_to_end_mix/global_step_600}"
+PROJECT_NAME="${PROJECT_NAME:-verl_agent_doudizhu_qwen3_5_4b_with_SFT}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-grpo_qwen3_5_4b_doudizhu_zh_with_SFT}"
 NUM_GPUS="${NUM_GPUS:-2}"
 
 num_cpus_per_env_worker="${NUM_CPUS_PER_ENV_WORKER:-0.1}"
@@ -18,12 +18,12 @@ val_data_size="${VAL_DATA_SIZE:-64}"
 group_size="${GROUP_SIZE:-16}"
 
 max_prompt_length="${MAX_PROMPT_LENGTH:-1536}"
-max_response_length="${MAX_RESPONSE_LENGTH:-1536}"
+max_response_length="${MAX_RESPONSE_LENGTH:-1024}"
 max_env_steps="${MAX_ENV_STEPS:-30}"
 
 ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE:-128}"
-ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
-log_prob_micro_batch_size_per_gpu="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-2}"
+ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU:-2}"
+log_prob_micro_batch_size_per_gpu="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-4}"
 rollout_tp_size="${ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE:-1}"
 gpu_memory_utilization="${GPU_MEMORY_UTILIZATION:-0.6}"
 max_num_batched_tokens="${MAX_NUM_BATCHED_TOKENS:-8192}"
@@ -31,7 +31,7 @@ enable_gradient_checkpointing="${ENABLE_GRADIENT_CHECKPOINTING:-True}"
 ref_param_offload="${REF_PARAM_OFFLOAD:-True}"
 
 total_epochs="${TOTAL_EPOCHS:-60}"
-save_freq="${SAVE_FREQ:--1}"
+save_freq="${SAVE_FREQ:-15}"
 test_freq="${TEST_FREQ:-5}"
 logger="${LOGGER:-['console','wandb']}"
 
@@ -65,7 +65,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.model.use_remove_padding=True \
+    actor_rollout_ref.model.use_remove_padding=False \
     actor_rollout_ref.model.enable_gradient_checkpointing="${enable_gradient_checkpointing}" \
     actor_rollout_ref.actor.ppo_mini_batch_size="${ppo_mini_batch_size}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${ppo_micro_batch_size_per_gpu}" \
@@ -110,6 +110,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.resume_mode=auto \
     trainer.test_freq="${test_freq}" \
     trainer.total_epochs="${total_epochs}" \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     "${extra_args[@]}" \
     "$@"
