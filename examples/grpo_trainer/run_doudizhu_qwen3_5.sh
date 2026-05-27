@@ -14,7 +14,7 @@ NUM_GPUS="${NUM_GPUS:-2}"
 
 num_cpus_per_env_worker="${NUM_CPUS_PER_ENV_WORKER:-0.1}"
 train_data_size="${TRAIN_DATA_SIZE:-8}"
-val_data_size="${VAL_DATA_SIZE:-64}"
+val_data_size="${VAL_DATA_SIZE:-128}"
 group_size="${GROUP_SIZE:-16}"
 
 max_prompt_length="${MAX_PROMPT_LENGTH:-1536}"
@@ -30,7 +30,7 @@ max_num_batched_tokens="${MAX_NUM_BATCHED_TOKENS:-8192}"
 enable_gradient_checkpointing="${ENABLE_GRADIENT_CHECKPOINTING:-True}"
 ref_param_offload="${REF_PARAM_OFFLOAD:-True}"
 
-total_epochs="${TOTAL_EPOCHS:-60}"
+total_epochs="${TOTAL_EPOCHS:-106}"
 save_freq="${SAVE_FREQ:-15}"
 test_freq="${TEST_FREQ:-5}"
 logger="${LOGGER:-['console','wandb']}"
@@ -57,8 +57,8 @@ python3 -m verl.trainer.main_ppo \
     data.val_batch_size="${val_data_size}" \
     data.max_prompt_length="${max_prompt_length}" \
     data.max_response_length="${max_response_length}" \
-    data.filter_overlong_prompts=True \
-    data.truncation='error' \
+    data.filter_overlong_prompts=False \
+    data.truncation='right' \
     data.image_key=images \
     data.return_raw_chat=True \
     +data.apply_chat_template_kwargs.enable_thinking=False \
