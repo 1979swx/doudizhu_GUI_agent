@@ -1,534 +1,400 @@
+# Dou Dizhu GUI Agentic Post-Training
+
+本仓库是在 `verl-agent` 基础上改造的斗地主 GUI agent 后训练项目。目标是训练一个视觉语言模型从游戏截图中读取牌局，按斗地主规则做决策，并通过归一化 GUI 坐标点击手牌、`出牌`、`不要` 等界面元素完成完整牌局。
+
+项目主线不是文本版斗地主，也不是只预测一条抽象动作，而是端到端的 GUI 控制：
+
+1. 从截图识别当前手牌、对手出牌、剩余牌数和按钮位置。
+2. 输出结构化 XML 响应，包括策略说明、语义出牌、GUI 点击、聊天和短期记忆。
+3. 由投影器解析 `left_click([x,y],...)`，在内存 GUI 环境里执行点击。
+4. 环境把点击还原为斗地主动作，计算投影合法性、点击命中、规则合法性、手牌推进和胜负奖励。
+5. 通过合成数据 SFT 与 GRPO 继续训练 Qwen3.5 VLM，使模型从“会点牌”过渡到“会打完整局”。
+
 <p align="center">
-    <img src="./docs/gigpo/logo-verl-agent.png" alt="logo" width="55%">
+  <video src="./demo.mp4" controls muted loop playsinline width="80%"></video>
 </p>
 
-
-<h3 align="center">
-<b>Group-in-Group Policy Optimization for LLM Agent Training</b>
-<br>
-<b>NeurIPS 2025</b>
-</h3>
-
-
 <p align="center">
-  <a href="https://arxiv.org/abs/2505.10978">
-    <img src="https://img.shields.io/badge/arXiv-Paper-red?style=flat-square&logo=arxiv" alt="arXiv Paper"></a>
-  &nbsp;
-  <a href="https://github.com/langfengQ/verl-agent">
-    <img src="https://img.shields.io/badge/GitHub-Project-181717?style=flat-square&logo=github" alt="GitHub Project"></a>
-  &nbsp;
-  <a href="https://huggingface.co/collections/langfeng01/verl-agent-684970e8f51babe2a6d98554">
-    <img src="https://img.shields.io/badge/HuggingFace-Models-yellow?style=flat-square&logo=huggingface" alt="HuggingFace Models"></a>
-  &nbsp;
-  <a href="https://x.com/langfengq/status/1930848580505620677">
-    <img src="https://img.shields.io/badge/Twitter-Channel-000000?style=flat-square&logo=x" alt="X Channel"></a>
-  &nbsp;
-  <a href="https://github.com/langfengQ/verl-agent/blob/master/LICENSE">
-    <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=flat-square" alt="License"></a>
-  &nbsp;
-  <a href="https://github.com/langfengQ/verl-agent/issues">
-    <img src="https://img.shields.io/github/issues/langfengQ/verl-agent?style=flat-square&color=green" alt="GitHub issues"></a>
-  &nbsp;
-  <a href="https://github.com/langfengQ/verl-agent/stargazers">
-    <img src="https://img.shields.io/github/stars/langfengQ/verl-agent?style=social" alt="Repo stars"></a>
-  &nbsp;
+  <a href="./demo.mp4">如果视频没有内嵌播放，点击查看 demo.mp4</a>
 </p>
 
-`verl-agent` is an extension of [veRL](https://github.com/volcengine/verl), specifically designed for training **large language model (LLM) agents via reinforcement learning (RL)**. 
+## 当前结果
 
-Unlike prior approaches that simply concatenate full interaction histories, `verl-agent` proposes **step-independent multi-turn rollout mechanism**, which allows for **fully customizable** per-step input structures, history management, and memory modules. This design makes `verl-agent` **highly scalable for very long-horizon, multi-turn RL training** (e.g., tasks in ALFWorld can require up to 50 steps to complete).
+主结果来自 `scripts/eval_doudizhu_model.py` 的在线环境评测。除 `kimi_k26_raw` 外，所有模型都在同一套本地 GUI 斗地主环境中运行；`kimi_k26_raw` 是端到端合成阶段的离线教师轨迹统计，适合作为教师数据源参考，不是严格 leaderboard 对照。
 
-`verl-agent` provides a **diverse set of RL algorithms** (including our new algorithm GiGPO) and a **rich suite of agent environments**, enabling the development of reasoning agents in both visual and text-based tasks.
+| 阶段 | 评测单位 | 胜率 | 奖励 | 投影合法率 | 规则合法动作率 | fallback 率 | 模型自主出牌推进 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Qwen3.5-4B baseline | 128 局 | 0.00% | -0.940 | 66.95% | 5.28% | 94.72% | 1.21% |
+| Qwen3.5-9B baseline | 128 局 | 0.00% | -0.945 | 59.49% | 2.85% | 97.15% | 1.25% |
+| Kimi K2.6 raw teacher | 485 局离线 raw | 10.52% | -0.538 | 91.87% | 63.32% | 36.65% | 48.91% |
+| Grounding-only SFT 400 | 256 局 | 0.00% | -0.868 | 93.81% | 22.76% | 77.24% | 8.54% |
+| End-to-end mix SFT 600 | 256 局 | 4.69% | -0.660 | 94.85% | 68.30% | 31.70% | 42.23% |
+| GRPO step 60 | 256 局 | 17.58% | -0.331 | 99.21% | 80.42% | 19.58% | 69.77% |
+| GRPO step 105 | 256 局 | 16.41% | -0.399 | 93.25% | 68.04% | 31.96% | 56.19% |
 
-# News
-- [2026.02] `HGPO` accepted at [ICLR 2026](https://iclr.cc/)! 🎉🎉🎉 [[Paper](https://openreview.net/forum?id=T8Dev99qnz)] [[Code](https://github.com/langfengQ/verl-agent/tree/master/recipe/hgpo)]
-- [2026.02] 🔥 We open-source [Dr. MAS](https://github.com/langfengQ/DrMAS), which supports stable end-to-end RL post-training of **multi-agent LLM systems**! [[Paper](https://arxiv.org/pdf/2602.08847)] [[Code](https://github.com/langfengQ/DrMAS)]
-- [2025.12] `Qwen3-VL` is supported! See example [here](./examples/gigpo_trainer/run_sokoban_qwen3vl.sh).
-- [2025.09] `GiGPO` is now supported by [ROLL](https://github.com/alibaba/ROLL)! [[Document](https://alibaba.github.io/ROLL/docs/English/UserGuide/agentic/agentic_GiGPO)] [[Train Curves](https://github.com/alibaba/ROLL/issues/173#issuecomment-3332106534)].
-- [2025.09] `verl-agent`-style training pipeline is now supported by [OpenManus-RL](https://github.com/OpenManus/OpenManus-RL)!
-- [2025.09] [GiGPO](https://arxiv.org/abs/2505.10978) accepted at [NeurIPS 2025](https://neurips.cc/)! 🎉🎉🎉
-- [2025.08] Add **Search-R1 experiments** and **similarity-based GiGPO**! Check out GiGPO's superior performance in Search-R1 experiments [here](#results).
-- [2025.07] `GiGPO` & `verl-agent` talks at [Agent for SWE meetup](https://lu.ma/e498qhsi) by LF AI & Data Singapore on 7/11.
-- [2025.07] Add modular memory manager. See [here](./agent_system/memory).
-- [2025.06] ***Major update***: Merge all features from the latest [veRL](https://github.com/volcengine/verl). For example, `verl-agent` now supports Qwen3, LoRA, REINFORCE++, and more. Feel free to explore!
-- [2025.05] Code released and paper on `GiGPO` released.
+对应的 command-to-click grounding 能力：
 
-# Quick Feature Summary
-| Feature Category | Supported Capabilities|
-| - | - |
-| **Interaction**          | ✅ Multi-turn Agent-Environment interaction<br>✅ Step-wise interaction<br>✅ Scalable for long-horizon tasks |
-| **Memory**               | ✅ Fully customizable memory module<br>✅ Flexible history management|
-| **Input Flexibility**    | ✅ Fully customizable per-step input structures |
-| **Execution**            | ✅ Parallelized Gym environments<br>✅ Group environments support (for group-based RL)|
-| **Model Support**        | ✅ Qwen3<br>✅ Qwen3-VL<br>✅ Qwen2.5<br>✅ Qwen2.5-VL<br>✅ LLaMA3.2<br>and more |
-| **Modality**             | ✅ Text-only<br>✅ Text + Image (multi-modal) |
-| **Lightweight Training** | ✅ Supports LoRA training |
-| **Environments**         | ✅ ALFWorld<br>✅ WebShop<br> ✅ Search (Tool Calling)<br> ✅ Sokoban<br>✅ Gym Cards<br>✅ AppWorld |
-| **RL Algorithms**        | ✅ GiGPO<br>✅ GRPO<br>✅ PPO<br>✅ DAPO<br>✅ GSPO<br>✅ RLOO<br>✅ REINFORCE++<br>✅ Dynamic sampling & clip-higher supported <br> and more |
-| **Prompt-based Agent**   | ✅ GPT-4o prompt-based agent  |
+| 阶段 | target action match | non-pass match | projection valid | click valid |
+|---|---:|---:|---:|---:|
+| Qwen3.5-4B baseline | 12.04% | 1.22% | 73.16% | 37.50% |
+| Qwen3.5-9B baseline | 15.01% | 3.31% | 87.81% | 48.79% |
+| Grounding-only SFT 400 | 93.09% | 90.90% | 100.00% | 98.74% |
+| End-to-end mix SFT 600 | 95.15% | 93.62% | 100.00% | 99.11% |
+| GRPO step 60 | 87.84% | 84.00% | 100.00% | 97.82% |
+| GRPO step 105 | 83.81% | 78.69% | 100.00% | 96.72% |
 
-# Framework Comparison
+更完整的分析见 [model_report.md](./model_report.md)。简要结论：
+
+- 原始 Qwen3.5-4B / 9B 都不会自然学会 GUI 斗地主，参数变大并不能替代任务内监督。
+- Grounding-only SFT 基本解决了“给定动作后点对牌”，但不会自己选择出牌。
+- 混合 grounding、QA、端到端轨迹的 SFT 让模型开始形成完整策略。
+- GRPO step 60 是当前综合最优 checkpoint，显著降低 fallback 依赖，并提升规则合法动作率和自主出牌推进。
+- GRPO 继续训练并非单调变好。step 105 胜率没有可靠增益，同时动作合法性、fallback 和 grounding 指标回落，应基于多指标 early stopping 选 checkpoint。
+
+## 项目能力
+
+- `doudizhu` 完整游戏环境：玩家 0 固定为地主，玩家 1/2 由规则 bot 控制，模型只通过 GUI 点击行动。
+- `doudizhu_grounding` 指挥执行环境：规则教师给出语义动作，模型只负责把动作落到截图坐标，用于训练和评测 GUI grounding。
+- 自定义渲染器：将 RLCard 风格斗地主状态渲染为 640x480 RGB GUI 图像，并维护手牌、按钮和出牌区域 hitbox。
+- XML 输出协议：完整游戏使用 `<plan>`, `<action>`, `<tool_call>`, `<chat>`, `<memory>` 五个标签；grounding 只允许一个 `<tool_call>` 标签。
+- 数据合成：支持视觉 QA、command-to-click grounding、Kimi/Moonshot API 教师端到端轨迹，以及 HTML review。
+- SFT：独立 Qwen3.5 VLM FSDP SFT trainer，支持一个或多个 parquet 数据源混合训练。
+- GRPO：接入 `verl-agent` 的多轮 rollout、视觉输入、环境分组采样和投影非法惩罚。
+- 评测：同一脚本同时评估完整牌局与 grounding state，输出 JSONL、CSV、bootstrap CI。
+- GUI 演示：Gradio 支持人工游玩、模型旁观、演示模式、离线轨迹回放、指挥模式和观看指挥模式。
+
 <p align="center">
-    <img src="./docs/gigpo/framework-comparison.png" alt="framework" width="100%">
+  <img src="./figures/doudizhu%20agent%20run.png" alt="Dou Dizhu agent run" width="80%">
 </p>
 
+## 代码结构
 
-# Table of Contents
+| 路径 | 用途 |
+|---|---|
+| `agent_system/environments/env_package/doudizhu/` | 完整 GUI 斗地主环境、渲染器、投影器和本地斗地主核心逻辑。 |
+| `agent_system/environments/env_package/doudizhu_grounding/` | command-to-click grounding 环境。 |
+| `agent_system/environments/prompts/doudizhu.py` | 完整游戏 prompt，含英文、中文和不同策略版本。 |
+| `agent_system/environments/prompts/doudizhu_grounding.py` | grounding prompt。 |
+| `data_synthesis/doudizhu_qa_sft.py` | 合成视觉规则 QA 数据。 |
+| `data_synthesis/doudizhu_grounding_sft.py` | 合成 GUI 点击 grounding 数据。 |
+| `data_synthesis/doudizhu_end_to_end_sft.py` | 用 API/Mock 教师采集端到端轨迹并过滤为 SFT 数据。 |
+| `SFT/qwen3_5_vlm_sft_trainer.py` | Qwen3.5 VLM FSDP SFT 训练器。 |
+| `SFT/run_qwen3_5_4B_doudizhu_*.sh` | 斗地主 SFT 配方。 |
+| `examples/grpo_trainer/run_doudizhu_qwen3_5.sh` | 完整斗地主 GRPO 训练入口。 |
+| `examples/grpo_trainer/run_doudizhu_grounding_qwen3_5.sh` | grounding GRPO 训练入口。 |
+| `scripts/eval_doudizhu_model.py` | 完整游戏与 grounding 统一在线评测。 |
+| `scripts/eval_kimi_doudizhu_raw.py` | Kimi raw 教师轨迹离线指标统计。 |
+| `scripts/human_play_doudizhu_web.py` | Gradio 调试和演示界面。 |
+| `tests/environments/test_doudizhu.py` | 环境、投影、奖励、prompt 和 grounding group 行为测试。 |
 
-- [Key Features](#key-features)
-- [Results](#results)  
-- [Installation](#installation)  
-  - [Install veRL](#install-verl)  
-  - [Install Supported Environments](#install-supported-environments)  
-    - [1. ALFWorld](#1-alfworld)  
-    - [2. WebShop](#2-webshop)
-    - [3. Search](#3-search)  
-    - [4. Sokoban](#4-sokoban)  
-    - [5. Gym Cards](#5-gym-cards)  
-    - [6. AppWorld (Experimental)](#6-appworld-experimental)  
-- [Run Examples](#run-examples)  
-  - [RL Training](#rl-training)  
-    - [1. GiGPO](#1-gigpo)  
-    - [2. GRPO](#2-grpo)  
-    - [3. PPO](#3-ppo)  
-    - [4. RLOO](#4-rloo)  
-    - [5. DAPO](#5-dapo)  
-    - [6. GiGPO (dynamic)](#6-gigpo-dynamic)
-  - [LoRA](#lora)
-  - [Prompt-based Agent with GPT-4o](#prompt-based-agent-with-gpt-4o)
-- [FAQ](#faq)
-  - [1. Customize Memory Module](#1-customize-memory-module)
-  - [2. Data Preparation](#2-data-preparation)
-  - [3. Customize Your Own Prompts](#3-customize-your-own-prompts)
-  - [4. Add New Environments](#4-add-new-environments)
-- [Contributing](#contributing)
-- [Acknowledgement](#acknowledgement)
-- [Awesome Work Powered by verl-agent & GiGPO](#awesome-work-powered-by-verl-agent--gigpo)
-- [Citation](#citation)
-- [Star History](#star-history)
+## 环境
 
-# Key Features
+本机主训练环境为 `verl-agent-bw-exp`。进入仓库根目录后：
 
-- **Multi-Turn Agent-Environment Interaction**
-
-  `verl-agent` supports multi-step interactive loops between agents and environments. Agents perceive environmental feedback after each step, forming the basis for reinforcement learning.
-
-- **Fully Customizable Memory Module & Per-Step Input Structure**
-
-  `verl-agent` features a **customizable memory module** (see [here](./agent_system/memory)) that allows for flexibly choosing what history to include for each step. The input typically consists of the current observation along with a concise history summary at each step (see prompt [here](./agent_system/environments/prompts/webshop.py)). Developers can **freely define what to include, such as recent steps, key events, summaries, or external knowledge**. There's no requirement to concatenate the full history, and the input structure for each step is ***fully customizable***.
-
-- **Scalable for Very Long-Horizon Optimization**
-
-  Prior works like [RAGEN](https://github.com/RAGEN-AI/RAGEN) and [Search-R1](https://github.com/PeterGriffinJin/Search-R1) concatenate the entire history of states and responses. This causes the context length to grow rapidly with the number of turns, making them difficult to scale to long-horizon scenarios. In contrast, `verl-agent` constructs inputs step-by-step. Each input is concise and customizable. This design keeps the context length almost constant over time, making `verl-agent` highly scalable for long-horizon scenarios (e.g., 30–50 steps in ALFWorld) without running into token limits or inefficiency.
-  
-- **Parallelized Gym-Style Environments and Group Environments**
-
-  `verl-agent` provides a gym-style interface with support for parallelized environments. This enables high-throughput rollouts, speeding up training. In addition, `verl-agent` introduces the concept of group environments. All environments within a group share identical initial states during `reset()`. This is especially useful for algorithms like GRPO and DAPO that require multiple rollouts on the same state. You can configure the number of rollouts per group using the `env.rollout.n` in [ppo_trainer.yaml](./verl/trainer/config/ppo_trainer.yaml) config file.
-
-- **Support for Various Models**
-
-  `verl-agent` supports a wide range of LLMs, including `Qwen3`, `Qwen3-VL`, `Qwen2.5`, `LLaMA3.2`, `Qwen2.5-VL`, and others, allowing flexibility for various deployment needs.
-
-- **LoRA Fine-Tuning Support**
-
-  `verl-agent` provides support for [LoRA](https://arxiv.org/abs/2106.09685) (Low-Rank Adaptation), significantly reducing computational cost. Now, `verl-agent` supports training 7B models using 2 H100 GPUs.
-
-- **Vision-Language Agent Support**
-
-  Beyond text-based agents, `verl-agent` also supports training vision-language agents. This enables multi-modal reasoning in environments where both visual perception and language understanding are required.
-
-- **Rich Suite of Environments**
-  
-  `verl-agent` offers a diverse set of interactive environments including [Search-R1](https://github.com/PeterGriffinJin/Search-R1) experiment, embodied AI environments like [ALFWorld](https://github.com/alfworld/alfworld), visual games such as [Sokoban](https://github.com/mpSchrader/gym-sokoban) and [Gym Cards](https://github.com/RL4VLM/RL4VLM/blob/main/gym-cards/README.md), and digital interface control tasks like [WebShop](https://github.com/princeton-nlp/WebShop) and [AppWorld](https://github.com/stonybrooknlp/appworld/) (experimental). 
-
-- **Diverse RL Algorithms**
-
-  `verl-agent` includes implementations of various RL algorithms, such as [GRPO](https://arxiv.org/abs/2402.03300), [PPO](https://arxiv.org/abs/1707.06347), [DAPO](https://arxiv.org/abs/2503.14476), [GSPO](https://arxiv.org/abs/2507.18071), [RLOO](https://arxiv.org/abs/2402.14740) and our new state-of-the-art algorithm [GiGPO](https://arxiv.org/abs/2505.10978). It also supports several variants enhanced with dynamic sampling and clip-higher techniques.
-
-# Results
-> ⚠️ Note: The performance of GiGPO has improved slightly after the "[2025.06.03] Major Update." To reproduce the original paper results, please use the version released prior to the "[2025.06.03] Major Update."
-
-| Algorithm          | Task         | Model      | Success Rate (Paper) | Training Log |
-|-------------------|--------------|--------------------------|-----------------------|-------------------------|
-| GiGPO | ALFWorld     | Qwen2.5-1.5B-Instruct    | 86.7%   |  [![wandb](https://img.shields.io/badge/W%26B-view-FFBE00?logo=wandb)](https://api.wandb.ai/links/langfeng-cs-nanyang-technological-university-singapore/78zz4sc9) |
-| GiGPO | ALFWorld     | Qwen2.5-7B-Instruct      | 90.8%   |  [![wandb](https://img.shields.io/badge/W%26B-view-FFBE00?logo=wandb)](https://api.wandb.ai/links/langfeng-cs-nanyang-technological-university-singapore/78zz4sc9) |
-| GiGPO | WebShop      | Qwen2.5-1.5B-Instruct    | 67.4%   |  [![wandb](https://img.shields.io/badge/W%26B-view-FFBE00?logo=wandb)](https://api.wandb.ai/links/langfeng-cs-nanyang-technological-university-singapore/zfnvpvxe) |
-| GiGPO | WebShop      | Qwen2.5-7B-Instruct      | 75.2%   |  [![wandb](https://img.shields.io/badge/W%26B-view-FFBE00?logo=wandb)](https://api.wandb.ai/links/langfeng-cs-nanyang-technological-university-singapore/zfnvpvxe) |
-| GiGPO | Sokoban [6x6]| Qwen2.5-VL-3B-Instruct   | 81.0%   | [![wandb](https://img.shields.io/badge/W%26B-view-FFBE00?logo=wandb)](https://api.wandb.ai/links/langfeng-cs-nanyang-technological-university-singapore/xm92tyea) |
-| GiGPO | EZPoints     | Qwen2.5-VL-3B-Instruct   | 100.0%  |  [![wandb](https://img.shields.io/badge/W%26B-view-FFBE00?logo=wandb)](https://api.wandb.ai/links/langfeng-cs-nanyang-technological-university-singapore/k0y51zei) |
-| GiGPO | NumberLine   | Qwen2-VL-2B-Instruct     | 100.0%  | [![wandb](https://img.shields.io/badge/W%26B-view-FFBE00?logo=wandb)](https://api.wandb.ai/links/langfeng-cs-nanyang-technological-university-singapore/81qzsc3n) |
-
-
-<table border="1" cellspacing="0" cellpadding="5">
-  <thead>
-    <tr>
-      <th>Date</th>
-      <th>Method</th>
-      <th>NQ†</th>
-      <th>TriviaQA*</th>
-      <th>PopQA*</th>
-      <th>HotpotQA†</th>
-      <th>2Wiki*</th>
-      <th>MuSiQue*</th>
-      <th>Bamboogle*</th>
-      <th>Avg.</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td colspan="10" align="center"><b>Qwen2.5-3B-Instruct</b></td>
-    </tr>
-    <tr>
-      <td>2025.03</td><td>R1-Instruct</td><td>27.0</td><td>53.7</td><td>19.9</td><td>23.7</td><td>29.2</td><td>7.2</td><td>29.3</td><td>27.1</td>
-    </tr>
-    <tr>
-      <td>2025.03</td><td>Search-R1</td><td>34.1</td><td>54.5</td><td>37.8</td><td>32.4</td><td>31.9</td><td>10.3</td><td>26.4</td><td>32.5</td>
-    </tr>
-    <tr>
-      <td>2025.05</td><td>ZeroSearch</td><td>41.4</td><td>57.4</td><td>44.8</td><td>27.4</td><td>30.0</td><td>9.8</td><td>11.1</td><td>31.7</td>
-    </tr>
-    <tr>
-      <td>2025.05</td><td>StepSearch</td><td>-</td><td>-</td><td>-</td><td>34.5</td><td>32.0</td><td>17.4</td><td>34.4</td><td>-</td>
-    </tr>
-    <tr>
-      <td>2025.05</td><td><b>GiGPO</b><a href="https://api.wandb.ai/links/langfeng-cs-nanyang-technological-university-singapore/1dd48ymw" target="_blank">
-      <img src="https://img.shields.io/badge/W%26B-view-FFBE00?logo=wandb" alt="wandb link"/>
-    </a></td><td>42.0</td><td>59.5</td><td>42.4</td><td>36.9</td><td>37.0</td><td>12.6</td><td>64.1</td><td>42.1</td>
-    </tr>
-    <tr>
-      <td colspan="10" align="center"><b>Qwen2.5-7B-Instruct</b></td>
-    </tr>
-    <tr>
-      <td>2025.03</td><td>R1-Instruct</td><td>21.0</td><td>44.9</td><td>17.1</td><td>20.8</td><td>27.5</td><td>6.0</td><td>19.2</td><td>22.4</td>
-    </tr>
-    <tr>
-      <td>2025.03</td><td>Search-R1</td><td>39.3</td><td>61.0</td><td>39.7</td><td>37.0</td><td>40.1</td><td>14.6</td><td>36.8</td><td>38.5</td>
-    </tr>
-    <tr>
-      <td>2025.05</td><td>ZeroSearch</td><td>43.6</td><td>61.8</td><td>51.5</td><td>34.6</td><td>35.2</td><td>18.4</td><td>27.8</td><td>39.1</td>
-    </tr>
-    <tr>
-      <td>2025.05</td><td>StepSearch</td><td>-</td><td>-</td><td>-</td><td>38.6</td><td>36.6</td><td>22.6</td><td>40.0</td><td>-</td>
-    </tr>
-    <tr>
-      <td>2025.05</td><td><b>GiGPO</b><a href="https://api.wandb.ai/links/langfeng-cs-nanyang-technological-university-singapore/1dd48ymw" target="_blank">
-      <img src="https://img.shields.io/badge/W%26B-view-FFBE00?logo=wandb" alt="wandb link"/>
-    </a></td><td>46.4</td><td>64.7</td><td>46.1</td><td>41.6</td><td>43.6</td><td>18.9</td><td>68.9</td><td>47.2</td>
-    </tr>
-  </tbody>
-</table>
-
-
-We have released our models on [HuggingFace](https://huggingface.co/collections/langfeng01/verl-agent-684970e8f51babe2a6d98554).
-
-# Installation
-## Install veRL
 ```bash
-conda create -n verl-agent python==3.12 -y
-conda activate verl-agent
-
-pip3 install vllm==0.11.0
-
-pip3 install flash-attn==2.7.4.post1 --no-build-isolation --no-cache-dir
+conda activate verl-agent-bw-exp
 pip install -e .
 ```
 
-## Install Supported Environments
-> ⚠️ **Important:** 
-To run an agent in any of these environments, you must first install and configure the corresponding environment. We strongly recommend installing ***each environment in its own dedicated conda environment*** to avoid potential package version conflicts.
+这份项目使用 Qwen3.5 VLM、vLLM、FlashAttention、Ray、Gradio、Pandas/Parquet 等依赖。不要直接把根目录 `requirements.txt` 当作 Qwen3.5 环境复现说明；其中仍保留了上游 verl/verl-agent 的旧约束。Blackwell / Qwen3.5 相关环境说明见：
 
-### 1. ALFWorld
-Install with pip:
-```bash
-pip3 install gymnasium==0.29.1
-pip3 install stable-baselines3==2.6.0
-pip install alfworld
-```
+- [study_guide/setup_env.md](./study_guide/setup_env.md)
+- [qwen3.5_guide.md](./qwen3.5_guide.md)
 
-Download PDDL & Game files and pre-trained MaskRCNN detector (will be stored in `~/.cache/alfworld/`):
-```bash
-alfworld-download -f
-```
-
-Use `--extra` to download pre-trained checkpoints and seq2seq data.
-
-Play a Textworld game:
-```bash
-alfworld-play-tw
-```
----
-
-### 2. WebShop
-WebShop requires Python <=3.10, so begin by creating a new `verl-agent-webshop` environment
-```bash
-conda create -n verl-agent-webshop python==3.10 -y
-conda activate verl-agent-webshop
-```
-
-Install WebShop
-```bash
-cd ./agent_system/environments/env_package/webshop/webshop
-./setup.sh -d all
-```
-
-Note: If you encounter issues with gdown, you may need to visit `https://drive.google.com/`, get your Google Drive cookie, and paste it into `.cache/gdown/cookies.txt`.
-Or you may need to manually download the files.
-
-After WebShop is installed, return to the root directory of the repository and install the verl package in `verl-agent`:
-```bash
-cd repo_root/
-pip3 install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-pip3 install flash-attn==2.7.4.post1 --no-build-isolation
-pip3 install -e .
-pip3 install vllm==0.8.2
-# spacy 3.7.2 requires typer<0.10.0,>=0.3.0, but you have typer 0.15.2 which is incompatible.
-# weasel 0.3.4 requires typer<0.10.0,>=0.3.0, but you have typer 0.15.2 which is incompatible.
-```
-The warnings can be safely ignored.
-
----
-
-### 3. Search
-```bash
-cd ./agent_system/environments/env_package/search/third_party
-pip install -e .
-pip install gym==0.26.2
-```
-
-Prepare dataset (data will be saved at `~/data/searchR1_processed_direct`):
-```bash
-cd repo_root/
-python examples/data_preprocess/preprocess_search_r1_dataset.py
-```
-
-
-Since faiss-gpu is not available via pip, we setup a separate conda environment for the local retrieval server. Running this server will use around 6GB of GPU memory per GPU, so make sure to account for this in your training run configuration. Build Retriever environments:
-```bash
-# Create and activate the retriever environment with Python 3.10
-conda create -n retriever python=3.10 -y
-conda activate retriever
-
-# Install PyTorch (with GPU support) and related libraries
-conda install numpy==1.26.4 # needed to stop incompatible version of numpy from being installed via pip
-pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-
-# Install other Python packages
-pip install transformers datasets pyserini huggingface_hub
-
-# Install the GPU version of faiss
-conda install faiss-gpu==1.8.0 -c pytorch -c nvidia -y
-
-# Install the API service framework
-pip install uvicorn fastapi
-```
-
-Download the index:
-```bash
-conda activate retriever
-
-local_dir=~/data/searchR1
-python examples/search/searchr1_download.py --local_dir $local_dir
-cat $local_dir/part_* > $local_dir/e5_Flat.index
-gzip -d $local_dir/wiki-18.jsonl.gz
-```
-
-Start the local flat e5 retrieval server: 
-```bash
-conda activate retriever
-
-# redirect the output to a file to avoid cluttering the terminal
-# we have observed outputting to the terminal causing spikes in server response times
-bash examples/search/retriever/retrieval_launch.sh > retrieval_server.log 
-```
-
-### 4. Sokoban
-```bash
-pip install matplotlib
-pip install gym==0.26.2
-pip install gym_sokoban==0.0.6
-```
----
-### 5. Gym Cards
+建议先跑最小测试：
 
 ```bash
-cd repo_root/
-pip3 install -e ./agent_system/environments/env_package/gym_cards/gym-cards/
-pip3 install gymnasium==0.29.1
-pip3 install stable-baselines3==2.6.0
-```
----
-### 6. AppWorld (Experimental)
-Install AppWorld package
-```bash
-cd repo_root/
-pip install git+https://github.com/StonyBrookNLP/appworld.git
-appworld install
-pip install -e .
-```
-You can ignore the warning of incompatibility for appworld, because we don't run appworld in `verl-agent` environment.
-
-Create a dedicated conda environment `appworld` for the AppWorld server:
-```bash
-conda create -n appworld python=3.12 -y
-conda activate appworld
-pip install git+https://github.com/StonyBrookNLP/appworld.git
-appworld install
-appworld download data
+pytest -q tests/environments/test_doudizhu.py
+pytest -q tests/data_synthesis/test_doudizhu_qa_sft.py tests/data_synthesis/test_doudizhu_end_to_end_sft.py
 ```
 
+## 交互演示
 
-<!-- > ⚠️ **Important:**  
-To run an agent in any of these environments, you must first install and configure the corresponding environment. Please refer to the [Environment Setup Guide](agent_system/environments/README.md) for step-by-step installation instructions. -->
-
-# Run Examples
-## RL Training
-We provide out-of-the-box scripts in the ["examples/"](./examples/) directory for training agents in different environments.
-
-Here are some examples:
-### 1. GiGPO
-GiGPO is our novel algorithm designed to support fine-grained credit assignment in long-horizon LLM agent training. It introduces a two-level grouping mechanism:
-- Episode-level groups capture overall task success via total returns (like GRPO).
-- Step-level groups gather repeated states across trajectories to compute relative advantages for individual actions.
-
-GiGPO is fully critic-free, maintains the same GPU memory footprint and LLM rollout cost as GRPO, yet achieves significantly better training efficiency and performance.
+使用当前最佳 GRPO checkpoint 启动中文 Gradio：
 
 ```bash
-bash examples/gigpo_trainer/run_alfworld.sh # ALFWorld
+conda activate verl-agent-bw-exp
+
+python scripts/human_play_doudizhu_web.py \
+  --model-backend local \
+  --model-path checkpoints/verl_agent_doudizhu_qwen3_5_4b_with_SFT/grpo_qwen3_5_4b_doudizhu_zh_with_SFT/global_step_60_huggingface_model \
+  --chinese-mode \
+  --server-name 127.0.0.1 \
+  --server-port 7860
 ```
+
+API 教师或外部 VLM 可以走 OpenAI-compatible 接口，例如 Kimi/Moonshot：
+
 ```bash
-bash examples/gigpo_trainer/run_webshop.sh # WebShop
+export MOONSHOT_API_KEY=...
+
+python scripts/human_play_doudizhu_web.py \
+  --model-backend api \
+  --api-base-url https://api.moonshot.cn/v1 \
+  --api-model kimi-k2.6 \
+  --api-key-env MOONSHOT_API_KEY \
+  --api-thinking disabled \
+  --chinese-mode
 ```
+
+Web UI 包含六个模式：人工游玩、模型旁观、演示模式、离线演示模式、指挥模式、观看指挥模式。指挥模式用于验证模型是否能把类似 `3 3`、`10 J Q K A`、`不要` 的语义动作准确转为 GUI 点击。
+
+## 数据合成
+
+当前仓库包含三类 SFT 数据：
+
+- `data_synthesis/doudizhu_qa_sft/`：视觉规则 QA。当前快照为 4000/400/400 train/val/test。
+- `data_synthesis/doudizhu_grounding_sft/`：command-to-click grounding。当前快照为 15000/1500/1500 train/val/test。
+- `data_synthesis/doudizhu_end_to_end_sft/`：Kimi/Moonshot 教师端到端轨迹过滤后的 SFT 数据。当前 raw 统计含 485 局，过滤得到 882 个可训练 step。
+
+重新生成 QA 数据：
+
 ```bash
-bash examples/gigpo_trainer/run_search.sh # Search
+conda activate verl-agent-bw-exp
+
+python data_synthesis/doudizhu_qa_sft.py \
+  --output-dir data_synthesis/doudizhu_qa_sft \
+  --train-samples 4000 \
+  --val-samples 400 \
+  --test-samples 400 \
+  --language zh
 ```
+
+重新生成 grounding 数据：
+
 ```bash
-bash examples/gigpo_trainer/run_sokoban.sh # Sokoban
+python data_synthesis/doudizhu_grounding_sft.py \
+  --output-dir data_synthesis/doudizhu_grounding_sft \
+  --train-samples 15000 \
+  --val-samples 1500 \
+  --test-samples 1500 \
+  --language zh \
+  --jitter 0.20
 ```
-### 2. GRPO
-GRPO is a critic-free algorithm that estimates relative advantages based on a group of full episode trajectories.
+
+采集端到端教师轨迹：
+
 ```bash
-bash examples/grpo_trainer/run_alfworld.sh # ALFWorld
+export MOONSHOT_API_KEY=...
+
+python data_synthesis/doudizhu_end_to_end_sft.py \
+  --output-dir data_synthesis/doudizhu_end_to_end_sft \
+  --model-backend api \
+  --api-base-url https://api.moonshot.cn/v1 \
+  --api-model kimi-k2.6 \
+  --api-key-env MOONSHOT_API_KEY \
+  --api-thinking disabled \
+  --temperature 0.6 \
+  --max-new-tokens 1536 \
+  --terminal-max-hand 2 \
+  --num-workers 8 \
+  --request-concurrency 8 \
+  --train-samples 1000 \
+  --val-samples 0 \
+  --test-samples 0
 ```
+
+只用已有 raw 轨迹重建 parquet：
+
 ```bash
-bash examples/grpo_trainer/run_webshop.sh # WebShop
+python data_synthesis/doudizhu_end_to_end_sft.py \
+  --filter-only \
+  --output-dir data_synthesis/doudizhu_end_to_end_sft
 ```
-### 3. PPO
-PPO is a classic actor-critic algorithm that updates the policy using a clipped objective to ensure stable learning. It requires a separate value network (critic) to estimate state values.
+
+生成 HTML review：
+
 ```bash
-bash examples/ppo_trainer/run_alfworld.sh # ALFWorld
+python data_synthesis/visualize_doudizhu_grounding_sft.py \
+  --input data_synthesis/doudizhu_grounding_sft/train.parquet \
+  --output data_synthesis/doudizhu_grounding_sft/review.html \
+  --num-samples 40
+
+python data_synthesis/visualize_doudizhu_end_to_end.py \
+  --input data_synthesis/doudizhu_end_to_end_sft/train.parquet \
+  --output data_synthesis/doudizhu_end_to_end_sft/review.html \
+  --num-samples 40
 ```
+
+更多细节见 [data_synthesis/README.md](./data_synthesis/README.md)。
+
+## SFT 训练
+
+推荐主线是先获得 grounding/QA/end-to-end 混合 SFT checkpoint，再从该 checkpoint 启动 GRPO。
+
 ```bash
-bash examples/ppo_trainer/run_webshop.sh # WebShop
+conda activate verl-agent-bw-exp
+
+NUM_GPUS=2 \
+MODEL_PATH=Qwen/Qwen3.5-4B \
+GROUNDING_DATA_DIR=data_synthesis/doudizhu_grounding_sft \
+QA_DATA_DIR=data_synthesis/doudizhu_qa_sft \
+END_TO_END_DATA_DIR=data_synthesis/doudizhu_end_to_end_sft \
+bash SFT/run_qwen3_5_4B_doudizhu_grounding_qa_end_to_end_mix_sft.sh
 ```
-### 4. RLOO
-For RLOO, we use a leave-one-out estimate and the PPO-clip update (instead of the REINFORCE update), making it closer to [LOOP](https://arxiv.org/abs/2502.01600).
+
+默认输出：
+
+```text
+checkpoints/sft/qwen3_5_4B_doudizhu_grounding_qa_end_to_end_mix/
+```
+
+常用中间实验：
+
 ```bash
-bash examples/rloo_trainer/run_alfworld.sh # ALFWorld
+# 只训练 command-to-click executor
+NUM_GPUS=2 MODEL_PATH=Qwen/Qwen3.5-4B \
+bash SFT/run_qwen3_5_4B_doudizhu_grounding_sft.sh
+
+# 只训练视觉规则 QA
+NUM_GPUS=2 MODEL_PATH=Qwen/Qwen3.5-4B \
+bash SFT/run_qwen3_5_4B_doudizhu_qa_sft.sh
+
+# 只训练端到端教师轨迹
+NUM_GPUS=2 MODEL_PATH=Qwen/Qwen3.5-4B \
+bash SFT/run_qwen3_5_4B_doudizhu_end_to_end_sft.sh
 ```
+
+SFT 数据行格式：
+
+- `prompt`：chat message list 或用户字符串，包含 `<image>`。
+- `images`：`[{"bytes": PNG_BYTES}]`。
+- `answer`：模型目标输出。
+- grounding 只输出 `<tool_call>left_click(...)</tool_call>`。
+- 完整游戏输出五标签格式。
+
+## GRPO 训练
+
+从混合 SFT checkpoint 启动完整斗地主 GRPO：
+
 ```bash
-bash examples/rloo_trainer/run_webshop.sh # WebShop
+conda activate verl-agent-bw-exp
+
+NUM_GPUS=2 \
+MODEL_PATH=checkpoints/sft/qwen3_5_4B_doudizhu_grounding_qa_end_to_end_mix/global_step_600 \
+PROJECT_NAME=verl_agent_doudizhu_qwen3_5_4b_with_SFT \
+EXPERIMENT_NAME=grpo_qwen3_5_4b_doudizhu_zh_with_SFT \
+GROUP_SIZE=16 \
+TRAIN_DATA_SIZE=8 \
+VAL_DATA_SIZE=128 \
+bash examples/grpo_trainer/run_doudizhu_qwen3_5.sh
 ```
-### 5. DAPO
-DAPO enhances GRPO with techniques like dynamic sampling and clip-higher.
+
+训练脚本会创建视觉 dummy parquet，并把真实状态交给环境 `reset()` / `step()`。关键配置：
+
+- `env.env_name=doudizhu`
+- `env.doudizhu.language=zh`
+- `env.doudizhu.chinese_mode=True`
+- `env.rollout.n=GROUP_SIZE`
+- `actor_rollout_ref.rollout.name=vllm`
+- `actor_rollout_ref.actor.use_projection_invalid_penalty=True`
+
+grounding GRPO：
+
 ```bash
-bash examples/dapo_trainer/run_alfworld.sh # ALFWorld
+NUM_GPUS=2 \
+MODEL_PATH=Qwen/Qwen3.5-4B \
+GROUP_SIZE=16 \
+bash examples/grpo_trainer/run_doudizhu_grounding_qwen3_5.sh
 ```
+
+奖励由环境 info 写回训练：
+
+- `projection_valid`：响应是否满足 XML 与 `left_click(...)` 解析协议。
+- `click_valid_ratio`：坐标是否命中手牌或按钮 hitbox。
+- `rule_action_valid`：点击还原出的动作是否是当前规则合法动作。
+- `hand_depletion`：非 fallback 动作使玩家 0 减少的手牌数。
+- `win/loss`：终局胜负奖励。
+
+完整游戏环境在非法动作时会执行 fallback，以保证 episode 可继续，但 fallback 会被指标和奖励记录下来。当前核心目标之一就是降低 fallback 依赖。
+
+## Checkpoint 转换
+
+评测和 vLLM 推理通常需要 Hugging Face 格式权重。若训练只保存了 FSDP actor shard，先合并：
+
 ```bash
-bash examples/dapo_trainer/run_webshop.sh # WebShop
+python scripts/model_merger.py merge \
+  --backend fsdp \
+  --local_dir checkpoints/verl_agent_doudizhu_qwen3_5_4b_with_SFT/grpo_qwen3_5_4b_doudizhu_zh_with_SFT/global_step_60/actor \
+  --target_dir checkpoints/verl_agent_doudizhu_qwen3_5_4b_with_SFT/grpo_qwen3_5_4b_doudizhu_zh_with_SFT/global_step_60_huggingface_model
 ```
-### 6. GiGPO (dynamic)
-GiGPO uses dynamic sampling and clip-higher from DAPO
+
+`scripts/human_play_doudizhu_web.py` 对本地 Transformers 演示有自动合并逻辑；`scripts/eval_doudizhu_model.py` 走 vLLM，建议显式传入已经合并好的目录。
+
+## 评测
+
+评估完整游戏与 grounding：
+
 ```bash
-bash examples/gigpo_dynamic_trainer/run_alfworld.sh # ALFWorld
+conda activate verl-agent-bw-exp
+
+python scripts/eval_doudizhu_model.py \
+  --model-path checkpoints/verl_agent_doudizhu_qwen3_5_4b_with_SFT/grpo_qwen3_5_4b_doudizhu_zh_with_SFT/global_step_60_huggingface_model \
+  --env both \
+  --output-dir outputs/doudizhu_model_eval/grpo_qwen3_5_4b_doudizhu_zh_with_SFT_global_step_60 \
+  --num-episodes 256 \
+  --num-envs 64 \
+  --grounding-samples-per-state 8 \
+  --max-response-length 1536 \
+  --max-env-steps 30 \
+  --gpu-memory-utilization 0.9 \
+  --data-parallel-size 2 \
+  --tensor-model-parallel-size 1
 ```
+
+输出文件：
+
+- `samples.jsonl`：逐 step 原始响应、投影、环境 info。
+- `episodes.jsonl`：完整游戏 episode 级指标。
+- `grounding_state_metrics.csv`：grounding canonical state 聚合指标。
+- `episode_metrics.csv`：episode/trajectory 指标。
+- `summary.csv` / `summary.json`：均值、标准差和 bootstrap 95% CI。
+
+评估 Kimi raw 教师轨迹：
+
 ```bash
-bash examples/gigpo_dynamic_trainer/run_webshop.sh # WebShop
+python scripts/eval_kimi_doudizhu_raw.py \
+  --raw-dir data_synthesis/doudizhu_end_to_end_sft/raw \
+  --output-dir outputs/doudizhu_model_eval/kimi_k26_raw
 ```
 
-## LoRA
-```bash
-bash examples/gigpo_trainer/run_alfworld_lora.sh
+批量评测示例见 [scripts/eval_doudizhu_models.sh](./scripts/eval_doudizhu_models.sh)。
+
+## 模型输出协议
+
+完整游戏响应必须严格包含五个非空 XML 标签：
+
+```xml
+<plan>根据截图简要分析当前局势。</plan>
+<action>[3, 3]</action>
+<tool_call>left_click([55,850],[100,860],[430,755])</tool_call>
+<chat>简短聊天。</chat>
+<memory>给下一回合使用的简短记忆。</memory>
 ```
 
-## Prompt-based Agent with GPT-4o
-We also provide a prompt-based GPT-4o agent.
-```bash
-bash examples/prompt_agent/run_gpt4o_agent.sh
+约束：
+
+- `<action>` 只能是 `[pass]` 或牌面列表，例如 `[3]`、`[3, 3]`、`[10, J, Q, K, A]`、`[BJ, RJ]`。
+- `<tool_call>` 只能是一个 `left_click([x,y],...)` 调用。
+- 坐标范围为 0 到 1000，`[0,0]` 是左上角，`[1000,1000]` 是右下角。
+- 出牌动作最后一次点击必须是 `出牌` / `PLAY` 按钮；过牌动作点击 `不要` / `PASS`。
+- 不要在 `<memory>` 中写入 `<image>` 或 Qwen 视觉占位符，环境管理器会清理这些 token。
+
+grounding 响应只允许：
+
+```xml
+<tool_call>left_click([55,850],[100,860],[430,755])</tool_call>
 ```
 
-# FAQ
+## 开发注意事项
 
-## 1. Customize Memory Module
-`verl-agent` supports a customizable and flexible memory system for managing and formatting interaction history between the agent and the environment. We provide a [SimpleMemory](./agent_system/memory/memory.py) implementation as a default starting point. This memory module is invoked within [env_manager.py](./agent_system/environments/env_manager.py) (i.e., `build_text_obs()`) to construct the observation at each step. 
+- `doudizhu` 和 `doudizhu_grounding` 都支持 `env.rollout.n` 分组采样。完整游戏会对组内环境重复同一 seed；grounding 会让组内样本共享同一个 canonical state，并由教师动作推进环境。
+- GRPO 类算法不要通过 `actor_rollout_ref.rollout.n` 控制组大小，本项目使用 `env.rollout.n`。
+- `doudizhu_grounding` 的环境推进由教师动作完成，模型动作只用于打分；这保证同一状态下多个样本可公平比较。
+- 完整游戏里 fallback 是环境兜底，不是模型成功。报告结果时应同时看 `fallback_rate`、`rule_action_valid_rate` 和 `model_hand_depletion_rate`。
+- `Kimi K2.6 raw` 是离线 raw 轨迹统计，与本地 checkpoint 的在线评测协议不同，不能当作严格同 seed 对照。
+- 当前最佳模型仍不是强斗地主 AI。项目价值主要在 GUI agent 后训练闭环、指标拆解和从 SFT 到 GRPO 的能力跃迁。
 
-Developers are encouraged to extend this module with custom memory strategies, such as dynamic summarization, selective memory retention, or external knowledge integration, to improve the handling of long-horizon interaction histories.
+## 上游与许可
 
-## 2. Data Preparation
-For most environments (e.g., AFLWorld, WebShop, Sokoban), we only use data preparation to indicate the modality, either "text" or "visual". For example, if the task is purely text-based, the data will just be an empty string "". If it involves visual input, it will be "\<image\>". As for agent input (including task instruction, observation and prompt), we follow the classical RL pipeline. That means the input of LLM agent comes from the environment's feedback through `env.step()`. In the case of search-r1 experiments where tasks are drawn from a dataset, we leverage the [env_kwargs](./examples/data_preprocess/preprocess_search_r1_dataset.py#L90) parameter to pass tasks into the environment, using: [envs.reset(kwargs=gen_batch.non_tensor_batch.pop('env_kwargs', None))](./agent_system/multi_turn_rollout/rollout_loop.py#L301).
-
-## 3. Customize Your Own Prompts  
-We adopt a simple and minimal prompt format in our implementation. For example, in the WebShop environment:
-```
-You are an expert autonomous agent operating in the WebShop e‑commerce environment.
-Your task is to: {task_description}. Prior to this step, you have already taken {step_count} step(s). Below are the most recent {history_length} observations and the corresponding actions you took: {action_history}. You are now at step {current_step} and your current observation is: {current_observation}. Your admissible actions of the current situation are: [{available_actions}].
-
-Now it's your turn to take one action for the current step.
-You should first reason step-by-step about the current situation, then think carefully which admissible action best advances the shopping goal. This reasoning process MUST be enclosed within <think> </think> tags. Once you've finished your reasoning, you should choose an admissible action for current step and present it within <action> </action> tags.
-```
-If you wish to further enhance or customize them, you can find and edit them in: [agent_system/environments/prompts](./agent_system/environments/prompts/).
-
-
-## 4. Add New Environments
-To add a new environment, 
-1. Create your environment package (gym-style interface and multi-process execution) in [agent_system/environments/env_package/](./agent_system/environments/env_package/)
-2. Define the corresponding prompt files in [agent_system/environments/prompts](./agent_system/environments/prompts/). 
-3. Register your new environment in [env_manager.py](./agent_system/environments/env_manager.py), following the structure defined by [EnvironmentManagerBase](./agent_system/environments/base.py#L19). 
-
-For a reference implementation, see the webshop environment:
-1. Environment package: [webshop package](./agent_system/environments/env_package/webshop)
-2. Prompts: [webshop prompts](./agent_system/environments/prompts/webshop.py)
-3. Environment Manager: [webshop env manager](./agent_system/environments/env_manager.py#L304)
-
-
-# Contributing
-
-We welcome and appreciate all contributions! If you have ideas to improve `verl-agent`, please feel free to submit a pull request (PR).
-
-Example contributions include:
-- **AppWorld Bug Fixes**: Fixed compatibility issues and ensured stable integration with the experimental AppWorld environment.
-- **Asynchronous Rollout**: Improved training efficiency and throughput by supporting asynchronous rollout pipelines.
-- **Additional Environments**: Added support for additional interactive environments to expand the benchmark coverage and task diversity.
-
-# Acknowledgement
-
-`verl-agent` codebase is built upon [veRL](https://github.com/volcengine/verl). 
-The supported environments are adapted from [ALFWorld](https://github.com/alfworld/alfworld), [Sokoban](https://github.com/mpSchrader/gym-sokoban), [SkyRL-Gym](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-gym), [Search-R1](https://github.com/PeterGriffinJin/Search-R1), [Gym Cards](https://github.com/RL4VLM/RL4VLM/tree/main/gym-cards), [WebShop](https://github.com/princeton-nlp/WebShop), and [AppWorld](https://github.com/stonybrooknlp/appworld). We extend our gratitude to the authors and contributors of these projects for their valuable work.
-
-We would also like to thank the following contributors for their specific improvements to this project: WebShop bug fix ([@YSLIU627](https://github.com/YSLIU627)), GSPO support ([@MakeKJ](https://github.com/MakeKJ)), Qwen3-VL support ([@FabianSchuetze](https://github.com/FabianSchuetze)).
-
-# Awesome Work Powered by verl-agent & GiGPO
-
-- [HGPO](https://arxiv.org/pdf/2602.22817): **Hierarchy-of-Groups** Policy Optimization for Long-Horizon Agentic Tasks. 
-- [Dr. MAS](https://arxiv.org/abs/2602.08847): Stable **end-to-end RL** post-training for **multi-agent LLM systems**. [![[code]](https://img.shields.io/github/stars/langfengQ/DrMAS)](https://github.com/langfengQ/DrMAS)
-- [AgentOCR](https://arxiv.org/abs/2601.04786): Efficient token compression by rendering multi-turn agent history into images and adopting agentic self-compression.
-- [OpenManus-RL](https://github.com/OpenManus/OpenManus-RL): An open-source framework for live-stream reinforcement learning tuning of LLM agents. [![[code]](https://img.shields.io/github/stars/OpenManus/OpenManus-RL)](https://github.com/OpenManus/OpenManus-RL)
-- [RLVMR](https://github.com/Tencent/DigitalHuman/tree/main/RLVMR): Providing agents with fine-grained meta-reasoning rewards in long-horizon tasks. [![[code]](https://img.shields.io/github/stars/Tencent/DigitalHuman)](https://github.com/Tencent/DigitalHuman/tree/main/RLVMR)
-- [UI-S1](https://github.com/X-PLUG/MobileAgent/tree/main/UI-S1): A GUI automation model using semi-online reinforcement learning for stable long-horizon task execution. [![[code]](https://img.shields.io/github/stars/X-PLUG/MobileAgent)](https://github.com/X-PLUG/MobileAgent/tree/main/UI-S1)
-- [Agent Learning via Early Experience](https://arxiv.org/pdf/2510.08558): A scalable, reward-free paradigm that bridges imitation learning and RL via implicit world modeling and self-reflection.
-- [SPEAR](https://github.com/TencentYoutuResearch/SPEAR): **Self-imitation** with **Progressive Exploration** for Agentic Reinforcement Learning (ICLR 2026). [![[code]](https://img.shields.io/github/stars/TencentYoutuResearch/SPEAR)](https://github.com/TencentYoutuResearch/SPEAR/tree/main/)
-
-# Citation
-If you find `verl-agent` and `GiGPO` useful in your research or applications, we would appreciate it if you could cite our work:
-
-```
-@article{feng2025group,
-  title={Group-in-Group Policy Optimization for LLM Agent Training},
-  author={Feng, Lang and Xue, Zhenghai and Liu, Tingcong and An, Bo},
-  journal={arXiv preprint arXiv:2505.10978},
-  year={2025}
-}
-```
-
-# Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=langfengQ/verl-agent&type=Date)](https://www.star-history.com/#langfengQ/verl-agent&Date)
+本项目继承并改造了 [verl-agent](https://github.com/langfengQ/verl-agent) 和 [veRL](https://github.com/volcengine/verl) 的 agentic RL 训练框架。斗地主规则核心与动作空间参考 RLCard，相关许可见 [agent_system/environments/env_package/doudizhu/RLCARD_LICENSE.md](./agent_system/environments/env_package/doudizhu/RLCARD_LICENSE.md)。仓库整体许可见 [LICENSE](./LICENSE)。
