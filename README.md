@@ -11,7 +11,7 @@
 5. 通过合成数据 SFT 与 GRPO 继续训练 Qwen3.5 VLM，使模型从“会点牌”过渡到“会打完整局”。
 
 <p align="center">
-  <video src="./demo.mp4" controls muted loop playsinline width="80%"></video>
+  <video src="./demo.mp4" controls muted autoplay loop playsinline width="80%"></video>
 </p>
 
 <p align="center">
