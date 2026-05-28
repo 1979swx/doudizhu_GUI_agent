@@ -9,6 +9,7 @@
 视频展示的是模型在斗地主 GUI 中读取截图、生成牌局分析、选择语义动作、输出鼠标点击坐标，并通过环境执行点击推进牌局的过程。
 
 **Tech Stack**：强化学习、veRL、vLLM、FSDP、数据合成、SFT、Agent、Ray
+
 **Hardware**：2 $\times$ NVIDIA RTX PRO 6000 96GB 
 
 ## 1. What This Project Does
