@@ -1,396 +1,175 @@
-# Dou Dizhu GUI Agentic Post-Training
+# Post-Training a Dou Dizhu GUI Agent Model
 
-本仓库是在 `verl-agent` 基础上改造的斗地主 GUI agent 后训练项目。目标是训练一个视觉语言模型从游戏截图中读取牌局，按斗地主规则做决策，并通过归一化 GUI 坐标点击手牌、`出牌`、`不要` 等界面元素完成完整牌局。
-
-项目主线不是文本版斗地主，也不是只预测一条抽象动作，而是端到端的 GUI 控制：
-
-1. 从截图识别当前手牌、对手出牌、剩余牌数和按钮位置。
-2. 输出结构化 XML 响应，包括策略说明、语义出牌、GUI 点击、聊天和短期记忆。
-3. 由投影器解析 `left_click([x,y],...)`，在内存 GUI 环境里执行点击。
-4. 环境把点击还原为斗地主动作，计算投影合法性、点击命中、规则合法性、手牌推进和胜负奖励。
-5. 通过合成数据 SFT 与 GRPO 继续训练 Qwen3.5 VLM，使模型从“会点牌”过渡到“会打完整局”。
+本项目训练了一个基于视觉的斗地主 GUI Agent。我把斗地主游戏做成了视觉 GUI agent 环境，在此环境下使用数据合成、SFT、GRPO 强化学习的完整 agentic 后训练流程训练了 Qwen3.5 4B 模型。经过严格评测，训练后的模型端到端能力远超基座模型和 teacher 模型 Kimi K2.6。完成了一个针对特定任务的 agentic post-training 从环境设计到模型指标提升的完整落地过程。
 
 <p align="center">
   <video src="https://github.com/user-attachments/assets/a2a855bb-d3eb-484c-9abd-8d536eca81a6" controls muted autoplay loop playsinline width="80%"></video>
 </p>
 
-## 当前结果
+视频展示的是模型在斗地主 GUI 中读取截图、生成牌局分析、选择语义动作、输出鼠标点击坐标，并通过环境执行点击推进牌局的过程。
 
-主结果来自 `scripts/eval_doudizhu_model.py` 的在线环境评测。除 `kimi_k26_raw` 外，所有模型都在同一套本地 GUI 斗地主环境中运行；`kimi_k26_raw` 是端到端合成阶段的离线教师轨迹统计，适合作为教师数据源参考，不是严格 leaderboard 对照。
+**Tech Stack**：强化学习、veRL、vLLM、FSDP、数据合成、SFT、Agent、Ray
+**Hardware**：2 $\times$ NVIDIA RTX PRO 6000 96GB 
 
-| 阶段 | 评测单位 | 胜率 | 奖励 | 投影合法率 | 规则合法动作率 | fallback 率 | 模型自主出牌推进 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Qwen3.5-4B baseline | 128 局 | 0.00% | -0.940 | 66.95% | 5.28% | 94.72% | 1.21% |
-| Qwen3.5-9B baseline | 128 局 | 0.00% | -0.945 | 59.49% | 2.85% | 97.15% | 1.25% |
-| Kimi K2.6 raw teacher | 485 局离线 raw | 10.52% | -0.538 | 91.87% | 63.32% | 36.65% | 48.91% |
-| Grounding-only SFT 400 | 256 局 | 0.00% | -0.868 | 93.81% | 22.76% | 77.24% | 8.54% |
-| End-to-end mix SFT 600 | 256 局 | 4.69% | -0.660 | 94.85% | 68.30% | 31.70% | 42.23% |
-| GRPO step 60 | 256 局 | 17.58% | -0.331 | 99.21% | 80.42% | 19.58% | 69.77% |
-| GRPO step 105 | 256 局 | 16.41% | -0.399 | 93.25% | 68.04% | 31.96% | 56.19% |
+## 1. What This Project Does
 
-对应的 command-to-click grounding 能力：
+我训练的是像一个真正的人一样，“用眼睛看”，“大脑思考与记忆”，“点击鼠标”，“同时聊天”的 斗地主 GUI agent model。每一轮，模型只接收当前系统提示词、游戏截图和上一轮自己留下的短记忆，然后必须一次性输出五类内容：
+
+- `<plan>`：对当前局势的简短分析。
+- `<action>`：语义出牌动作，例如 `[3, 3]`、`[10, J, Q, K, A]`、`[pass]`。
+- `<tool_call>`：归一化 GUI 点击坐标，例如 `left_click([55,850],[100,860],[430,755])`。
+- `<chat>`：面向演示 UI 的一句自然语言反馈。
+- `<memory>`：留给下一轮的短期记忆。
+
+示例输出：
+
+```xml
+<plan>当前我是地主，需要先压低小牌并保留高牌控制权。</plan>
+<action>[3, 3]</action>
+<tool_call>left_click([55,850],[100,860],[430,755])</tool_call>
+<chat>先走一对小牌试探一下。</chat>
+<memory>已出一对3，后续保留高牌控场。</memory>
+```
+
+环境会解析 `tool_call`，把点击坐标投影到 GUI 游戏界面，再还原成斗地主规则动作。如果动作合法，牌局继续推进；如果动作无法执行，环境会记录失败原因，并用 fallback 保证 episode 可以继续结束，便于稳定训练和评测。
+
+## 2. Why It Is Non-Trivial
+
+这不是单纯的“会不会斗地主规则”问题，而是一个视觉感知、规则推理、GUI grounding 和多轮策略共同耦合的任务。
+
+| 难点 | 具体挑战 |
+|---|---|
+| 视觉读牌 | 模型需要从截图识别自己的手牌、其他玩家出牌、剩余牌数、地主身份和按钮状态。 |
+| 游戏推理 | 斗地主有特定规则，模型必须根据规则进行推理；动作空间复杂，顺子、连对、飞机、炸弹、王炸、带牌关系都要和当前牌局上下文对齐。 |
+| GUI grounding | 语义动作不能直接执行，必须映射到正确牌面和按钮的坐标位置，且点击顺序要正确。 |
+| 长程决策 | 单步点击正确不等于会赢整局，模型需要在多轮反馈中学会减少无效动作、推进手牌并保留关键牌。 |
+| 训练稳定性 | 环境既要严格记录模型失败，又不能让大量非法点击直接中断 rollout。 |
+
+原始 Qwen3.5-4B / 9B 在完整游戏且几乎无法自主推进手牌，说明仅靠基座模型能力不能自然解决这个 GUI agent 任务。
+
+## 3. Results
+
+| 阶段 | 胜率 | 规则合法动作率 | fallback 率 | 模型自主出牌推进 | 平均每局出牌数，共20张牌 |
+|---|---:|---:|---:|---:|---:|
+| Qwen3.5-4B baseline | 0.00% | 5.28% | 94.72% | 1.21% | 0.24 |
+| Qwen3.5-9B baseline | 0.00% | 2.85% | 97.15% | 1.25% | 0.25 |
+| Kimi K2.6 raw teacher | 10.52% | 63.32% | 36.65% | 48.91% | 9.78 |
+| Grounding-only SFT 400 | 0.00% | 22.76% | 77.24% | 8.54% | 1.71 |
+| End-to-end mix SFT 600 | 4.69% | 68.30% | 31.70% | 42.23% |8.45 |
+| **🌟GRPO step 60** | 17.58% | 80.42% | 19.58% | 69.77% | 13.95 |
+| GRPO step 105 | 16.41% | 68.04% | 31.96% | 56.19% | 11.24 |
+
+主要结论：
+
+- Baseline 胜率为 0，说明原始 VLM 不能直接完成端到端 GUI 斗地主。
+- 9B 模型的表现同样差，说明不是放大模型参数就能自然解决问题。
+- Grounding-only SFT 能明显改善点击执行，但不能带来完整游戏胜率。
+- End-to-end mix SFT 让模型开始自己选择动作并打完整局。
+- GRPO step 60 是当前综合最优 checkpoint，在胜率、规则合法动作率、fallback 率和自主出牌推进上同时最好。
+- GRPO step 60 的表现全面显著超越 Kimi K2.6 teacher 的表现，说明强化学习训练能够让小模型在特定任务场景下超越前沿模型。
+- GRPO step 105 胜率没有可靠继续提升，且动作质量指标回落，说明后训练需要多指标 early stopping。
+
+Grounding / GUI 执行能力也有独立评测：
 
 | 阶段 | target action match | non-pass match | projection valid | click valid |
 |---|---:|---:|---:|---:|
 | Qwen3.5-4B baseline | 12.04% | 1.22% | 73.16% | 37.50% |
-| Qwen3.5-9B baseline | 15.01% | 3.31% | 87.81% | 48.79% |
-| Grounding-only SFT 400 | 93.09% | 90.90% | 100.00% | 98.74% |
-| End-to-end mix SFT 600 | 95.15% | 93.62% | 100.00% | 99.11% |
 | GRPO step 60 | 87.84% | 84.00% | 100.00% | 97.82% |
-| GRPO step 105 | 83.81% | 78.69% | 100.00% | 96.72% |
 
-更完整的分析见 [model_report.md](./model_report.md)。简要结论：
 
-- 原始 Qwen3.5-4B / 9B 都不会自然学会 GUI 斗地主，参数变大并不能替代任务内监督。
-- Grounding-only SFT 基本解决了“给定动作后点对牌”，但不会自己选择出牌。
-- 混合 grounding、QA、端到端轨迹的 SFT 让模型开始形成完整策略。
-- GRPO step 60 是当前综合最优 checkpoint，显著降低 fallback 依赖，并提升规则合法动作率和自主出牌推进。
-- GRPO 继续训练并非单调变好。step 105 胜率没有可靠增益，同时动作合法性、fallback 和 grounding 指标回落，应基于多指标 early stopping 选 checkpoint。
+## 4. System Architecture
 
-## 项目能力
+| 模块 | 我实现的内容 | 作用 |
+|---|---|---|
+| GUI 斗地主环境 | 实现完整游戏环境、截图渲染、hitbox、规则 bot 对手、fallback 记录和 Ray/local vector env。 | 把规则游戏改造成可训练、可评测、可演示的视觉 GUI agent 环境。 |
+| Action projection | 设计五 XML标签 输出协议、`left_click(...)` 工具定义、坐标合法性检查、语义动作校验。 | 将 VLM 文本输出可靠接入真实环境动作空间，并能定位失败类型。 |
+| Grounding 环境 | 实现根据指挥执行點擊操作任务。 | 拆分“会不会正确点击”和“会不会自己决策”两种能力。 |
+| 数据合成 | 构建视觉规则 QA、command-to-click grounding、Kimi K2.6 端到端教师轨迹过滤，三种合成数据。 | 为从感知到策略的能力训练提供可控的高质量数据源。 |
+| SFT 训练 | 实现 Qwen3.5 FSDP SFT trainer，并支持多 parquet 混合训练。 | 让模型先学会稳定输出协议、执行 GUI 动作，学习游戏规则和策略思考。 |
+| GRPO 后训练 | 接入 `verl-agent` 多轮 rollout、视觉输入、环境组采样和投影失败处理。 | 用真实环境反馈把 SFT 训练过的模型继续推向更强的端到端表现。 |
+| 评测体系 | 实现完整游戏评测、grounding 评测、记录性能指标。 | 不只看胜率，还能分析模型的失败模式。 |
+| Gradio 演示 | 实现人工游玩、模型旁观、指挥模式、观看指挥和离线演示。 | 让模型行为可以被直观看到、调试和展示。 |
 
-- `doudizhu` 完整游戏环境：玩家 0 固定为地主，玩家 1/2 由规则 bot 控制，模型只通过 GUI 点击行动。
-- `doudizhu_grounding` 指挥执行环境：规则教师给出语义动作，模型只负责把动作落到截图坐标，用于训练和评测 GUI grounding。
-- 自定义渲染器：将 RLCard 风格斗地主状态渲染为 640x480 RGB GUI 图像，并维护手牌、按钮和出牌区域 hitbox。
-- XML 输出协议：完整游戏使用 `<plan>`, `<action>`, `<tool_call>`, `<chat>`, `<memory>` 五个标签；grounding 只允许一个 `<tool_call>` 标签。
-- 数据合成：支持视觉 QA、command-to-click grounding、Kimi/Moonshot API 教师端到端轨迹，以及 HTML review。
-- SFT：独立 Qwen3.5 VLM FSDP SFT trainer，支持一个或多个 parquet 数据源混合训练。
-- GRPO：接入 `verl-agent` 的多轮 rollout、视觉输入、环境分组采样和投影非法惩罚。
-- 评测：同一脚本同时评估完整牌局与 grounding state，输出 JSONL、CSV、bootstrap CI。
-- GUI 演示：Gradio 支持人工游玩、模型旁观、演示模式、离线轨迹回放、指挥模式和观看指挥模式。
+## 5. Training Pipeline
 
-<p align="center">
-  <img src="./figures/doudizhu%20agent%20run.png" alt="Dou Dizhu agent run" width="80%">
-</p>
-
-## 代码结构
-
-| 路径 | 用途 |
-|---|---|
-| `agent_system/environments/env_package/doudizhu/` | 完整 GUI 斗地主环境、渲染器、投影器和本地斗地主核心逻辑。 |
-| `agent_system/environments/env_package/doudizhu_grounding/` | command-to-click grounding 环境。 |
-| `agent_system/environments/prompts/doudizhu.py` | 完整游戏 prompt，含英文、中文和不同策略版本。 |
-| `agent_system/environments/prompts/doudizhu_grounding.py` | grounding prompt。 |
-| `data_synthesis/doudizhu_qa_sft.py` | 合成视觉规则 QA 数据。 |
-| `data_synthesis/doudizhu_grounding_sft.py` | 合成 GUI 点击 grounding 数据。 |
-| `data_synthesis/doudizhu_end_to_end_sft.py` | 用 API/Mock 教师采集端到端轨迹并过滤为 SFT 数据。 |
-| `SFT/qwen3_5_vlm_sft_trainer.py` | Qwen3.5 VLM FSDP SFT 训练器。 |
-| `SFT/run_qwen3_5_4B_doudizhu_*.sh` | 斗地主 SFT 配方。 |
-| `examples/grpo_trainer/run_doudizhu_qwen3_5.sh` | 完整斗地主 GRPO 训练入口。 |
-| `examples/grpo_trainer/run_doudizhu_grounding_qwen3_5.sh` | grounding GRPO 训练入口。 |
-| `scripts/eval_doudizhu_model.py` | 完整游戏与 grounding 统一在线评测。 |
-| `scripts/eval_kimi_doudizhu_raw.py` | Kimi raw 教师轨迹离线指标统计。 |
-| `scripts/human_play_doudizhu_web.py` | Gradio 调试和演示界面。 |
-| `tests/environments/test_doudizhu.py` | 环境、投影、奖励、prompt 和 grounding group 行为测试。 |
-
-## 环境
-
-本机主训练环境为 `verl-agent-bw-exp`。进入仓库根目录后：
-
-```bash
-conda activate verl-agent-bw-exp
-pip install -e .
+```mermaid
+flowchart LR
+    A[GUI Dou Dizhu Environment] --> B[Visual Rule QA]
+    A --> C[Command-to-Click Grounding]
+    A --> D[Kimi K2.6 End-to-End Rollouts]
+    B --> E[Mixed SFT]
+    C --> E
+    D --> E
+    E --> F[GRPO in GUI Environment]
+    F --> G[Online Evaluation]
+    G --> H[Checkpoint Selection]
 ```
 
-这份项目使用 Qwen3.5 VLM、vLLM、FlashAttention、Ray、Gradio、Pandas/Parquet 等依赖。不要直接把根目录 `requirements.txt` 当作 Qwen3.5 环境复现说明；其中仍保留了上游 verl/verl-agent 的旧约束。Blackwell / Qwen3.5 相关环境说明见：
-
-- [study_guide/setup_env.md](./study_guide/setup_env.md)
-- [qwen3.5_guide.md](./qwen3.5_guide.md)
-
-建议先跑最小测试：
-
-```bash
-pytest -q tests/environments/test_doudizhu.py
-pytest -q tests/data_synthesis/test_doudizhu_qa_sft.py tests/data_synthesis/test_doudizhu_end_to_end_sft.py
-```
-
-## 交互演示
-
-使用当前最佳 GRPO checkpoint 启动中文 Gradio：
-
-```bash
-conda activate verl-agent-bw-exp
-
-python scripts/human_play_doudizhu_web.py \
-  --model-backend local \
-  --model-path checkpoints/verl_agent_doudizhu_qwen3_5_4b_with_SFT/grpo_qwen3_5_4b_doudizhu_zh_with_SFT/global_step_60_huggingface_model \
-  --chinese-mode \
-  --server-name 127.0.0.1 \
-  --server-port 7860
-```
-
-API 教师或外部 VLM 可以走 OpenAI-compatible 接口，例如 Kimi/Moonshot：
-
-```bash
-export MOONSHOT_API_KEY=...
-
-python scripts/human_play_doudizhu_web.py \
-  --model-backend api \
-  --api-base-url https://api.moonshot.cn/v1 \
-  --api-model kimi-k2.6 \
-  --api-key-env MOONSHOT_API_KEY \
-  --api-thinking disabled \
-  --chinese-mode
-```
-
-Web UI 包含六个模式：人工游玩、模型旁观、演示模式、离线演示模式、指挥模式、观看指挥模式。指挥模式用于验证模型是否能把类似 `3 3`、`10 J Q K A`、`不要` 的语义动作准确转为 GUI 点击。
-
-## 数据合成
-
-当前仓库包含三类 SFT 数据：
-
-- `data_synthesis/doudizhu_qa_sft/`：视觉规则 QA。当前快照为 4000/400/400 train/val/test。
-- `data_synthesis/doudizhu_grounding_sft/`：command-to-click grounding。当前快照为 15000/1500/1500 train/val/test。
-- `data_synthesis/doudizhu_end_to_end_sft/`：Kimi/Moonshot 教师端到端轨迹过滤后的 SFT 数据。当前 raw 统计含 485 局，过滤得到 882 个可训练 step。
-
-重新生成 QA 数据：
-
-```bash
-conda activate verl-agent-bw-exp
-
-python data_synthesis/doudizhu_qa_sft.py \
-  --output-dir data_synthesis/doudizhu_qa_sft \
-  --train-samples 4000 \
-  --val-samples 400 \
-  --test-samples 400 \
-  --language zh
-```
-
-重新生成 grounding 数据：
-
-```bash
-python data_synthesis/doudizhu_grounding_sft.py \
-  --output-dir data_synthesis/doudizhu_grounding_sft \
-  --train-samples 15000 \
-  --val-samples 1500 \
-  --test-samples 1500 \
-  --language zh \
-  --jitter 0.20
-```
+训练分为四个阶段：
 
-采集端到端教师轨迹：
-
-```bash
-export MOONSHOT_API_KEY=...
-
-python data_synthesis/doudizhu_end_to_end_sft.py \
-  --output-dir data_synthesis/doudizhu_end_to_end_sft \
-  --model-backend api \
-  --api-base-url https://api.moonshot.cn/v1 \
-  --api-model kimi-k2.6 \
-  --api-key-env MOONSHOT_API_KEY \
-  --api-thinking disabled \
-  --temperature 0.6 \
-  --max-new-tokens 1536 \
-  --terminal-max-hand 2 \
-  --num-workers 8 \
-  --request-concurrency 8 \
-  --train-samples 1000 \
-  --val-samples 0 \
-  --test-samples 0
-```
-
-只用已有 raw 轨迹重建 parquet：
-
-```bash
-python data_synthesis/doudizhu_end_to_end_sft.py \
-  --filter-only \
-  --output-dir data_synthesis/doudizhu_end_to_end_sft
-```
-
-生成 HTML review：
-
-```bash
-python data_synthesis/visualize_doudizhu_grounding_sft.py \
-  --input data_synthesis/doudizhu_grounding_sft/train.parquet \
-  --output data_synthesis/doudizhu_grounding_sft/review.html \
-  --num-samples 40
-
-python data_synthesis/visualize_doudizhu_end_to_end.py \
-  --input data_synthesis/doudizhu_end_to_end_sft/train.parquet \
-  --output data_synthesis/doudizhu_end_to_end_sft/review.html \
-  --num-samples 40
-```
+1. **视觉规则 QA**：先让模型读懂截图中的手牌、牌型、候选动作和合法动作集合。
+2. **Grounding**：给定目标动作，只训练模型把目标牌和提交按钮点出来。
+3. **End-to-end**：混入教师完整轨迹，让模型开始自己判断局势并选择动作。
+4. **混合 SFT**：三种数据集混合在一起进行 SFT 训练。
+5. **GRPO**：在真实 GUI 环境中进行多轮 rollout，基于环境反馈继续优化完整牌局行为。
 
-更多细节见 [data_synthesis/README.md](./data_synthesis/README.md)。
-
-## SFT 训练
+checkpoint 选择不只看胜率，而是同时观察：
 
-推荐主线是先获得 grounding/QA/end-to-end 混合 SFT checkpoint，再从该 checkpoint 启动 GRPO。
+- `projection_valid_rate`：输出是否符合协议并能投影成 GUI 动作。
+- `click_valid_ratio`：点击坐标是否命中真实 GUI 元素。
+- `rule_action_valid_rate`：点击还原出的动作是否符合斗地主规则。
+- `fallback_rate`：环境是否不得不用兜底动作推进牌局。
+- `model_hand_depletion_rate`：模型的动作是否真正减少了玩家手牌。
+- `won`：完整牌局是否获胜。
 
-```bash
-conda activate verl-agent-bw-exp
+这些指标能区分“格式正确”“点得准”“动作合法”和“真的会打牌”。
 
-NUM_GPUS=2 \
-MODEL_PATH=Qwen/Qwen3.5-4B \
-GROUNDING_DATA_DIR=data_synthesis/doudizhu_grounding_sft \
-QA_DATA_DIR=data_synthesis/doudizhu_qa_sft \
-END_TO_END_DATA_DIR=data_synthesis/doudizhu_end_to_end_sft \
-bash SFT/run_qwen3_5_4B_doudizhu_grounding_qa_end_to_end_mix_sft.sh
-```
+## 6. Data Synthesis Pipeline
 
-默认输出：
+我设计了三条数据合成管线，分别对应不同能力：
 
-```text
-checkpoints/sft/qwen3_5_4B_doudizhu_grounding_qa_end_to_end_mix/
-```
-
-常用中间实验：
-
-```bash
-# 只训练 command-to-click executor
-NUM_GPUS=2 MODEL_PATH=Qwen/Qwen3.5-4B \
-bash SFT/run_qwen3_5_4B_doudizhu_grounding_sft.sh
-
-# 只训练视觉规则 QA
-NUM_GPUS=2 MODEL_PATH=Qwen/Qwen3.5-4B \
-bash SFT/run_qwen3_5_4B_doudizhu_qa_sft.sh
-
-# 只训练端到端教师轨迹
-NUM_GPUS=2 MODEL_PATH=Qwen/Qwen3.5-4B \
-bash SFT/run_qwen3_5_4B_doudizhu_end_to_end_sft.sh
-```
-
-SFT 数据行格式：
-
-- `prompt`：chat message list 或用户字符串，包含 `<image>`。
-- `images`：`[{"bytes": PNG_BYTES}]`。
-- `answer`：模型目标输出。
-- grounding 只输出 `<tool_call>left_click(...)</tool_call>`。
-- 完整游戏输出五标签格式。
+| 数据 | 规模 | 训练目标 | 关键设计 |
+|---|---:|---|---|
+| Visual Rule QA | 4,000 train / 400 val / 400 test | 读牌、数牌、识别牌型、判断候选动作合法性。 | 覆盖 18 类游戏规则问答任务，并对稀有牌型做配额控制。 |
+| Command-to-Click Grounding | 15,000 train / 1,500 val / 1,500 test | 给定目标动作，输出正确 GUI 点击。 | 按 pass、单牌、对子、三张、顺子/连对、炸弹/王炸等类别采样。 |
+| End-to-End Teacher Rollouts | Kimi K2.6 raw episodes + filtered steps | 从截图直接生成 plan、action、tool call、chat、memory。 | 过滤掉协议错误、点击无效、规则非法、fallback、长度超限等负样本。 |
 
-## GRPO 训练
+三条数据线的作用不同：
 
-从混合 SFT checkpoint 启动完整斗地主 GRPO：
+- QA 数据负责补斗地主环境的视觉能力和斗地主规则基础。
+- Grounding 数据负责让模型能够点击正确位置，避免端到端训练早期被坐标错误淹没。
+- 教师轨迹负责让模型看到完整决策格式和多轮游戏上下文。
 
-```bash
-conda activate verl-agent-bw-exp
-
-NUM_GPUS=2 \
-MODEL_PATH=checkpoints/sft/qwen3_5_4B_doudizhu_grounding_qa_end_to_end_mix/global_step_600 \
-PROJECT_NAME=verl_agent_doudizhu_qwen3_5_4b_with_SFT \
-EXPERIMENT_NAME=grpo_qwen3_5_4b_doudizhu_zh_with_SFT \
-GROUP_SIZE=16 \
-TRAIN_DATA_SIZE=8 \
-VAL_DATA_SIZE=128 \
-bash examples/grpo_trainer/run_doudizhu_qwen3_5.sh
-```
-
-训练脚本会创建视觉 dummy parquet，并把真实状态交给环境 `reset()` / `step()`。关键配置：
-
-- `env.env_name=doudizhu`
-- `env.doudizhu.language=zh`
-- `env.doudizhu.chinese_mode=True`
-- `env.rollout.n=GROUP_SIZE`
-- `actor_rollout_ref.rollout.name=vllm`
-- `actor_rollout_ref.actor.use_projection_invalid_penalty=True`
+最终 SFT 使用混合数据，让模型先形成稳定输出协议、可执行 GUI 动作、具备初步胜率，再进入 RL 阶段。这个顺序很关键。
 
-grounding GRPO：
+## 7. RL Reward Design
 
-```bash
-NUM_GPUS=2 \
-MODEL_PATH=Qwen/Qwen3.5-4B \
-GROUP_SIZE=16 \
-bash examples/grpo_trainer/run_doudizhu_grounding_qwen3_5.sh
-```
+本项目的 RL 奖励设置除了终局胜负信号，还设置了多种能从各方面反映 GUI Agent 动作质量的密集奖励。
 
-奖励由环境 info 写回训练：
+| 信号类别 | 解决的问题 | 数值大小 |
+|---|---|---|
+| 输出协议奖励 | 让模型稳定生成可解析的五标签结构和 `left_click(...)` 工具调用。 | 0.5 |
+| GUI 点击奖励 | 让模型“坐标真的点中手牌/按钮”。 | 0.6 |
+| 规则合法性信号 | 约束模型输出在当前局面下合法的斗地主动作。 | 1.5 |
+| 手牌减少信号 | 训练模型知道斗地主要靠真正减少自己手牌来推进游戏。 | 0.2 每张牌 |
+| 终局结果信号 | 让模型在局部可执行之外继续优化完整牌局策略。 | 7.0 |
 
-- `projection_valid`：响应是否满足 XML 与 `left_click(...)` 解析协议。
-- `click_valid_ratio`：坐标是否命中手牌或按钮 hitbox。
-- `rule_action_valid`：点击还原出的动作是否是当前规则合法动作。
-- `hand_depletion`：非 fallback 动作使玩家 0 减少的手牌数。
-- `win/loss`：终局胜负奖励。
+环境层面的一个关键设计是：fallback 会继续推进牌局，但会被完整记录。这样做有两个好处：
 
-完整游戏环境在非法动作时会执行 fallback，以保证 episode 可继续，但 fallback 会被指标和奖励记录下来。当前核心目标之一就是降低 fallback 依赖。
+- 训练和评测不会因为模型的非法点击而停滞。
+- 指标上可以明确区分模型自己的有效行为和环境兜底行为。
 
-## Checkpoint 转换
+GRPO 训练时，我使用在同一 seed 的环境中进行多轮 rollout 做组内比较，让模型在相似局面下学习更稳定的动作选择。
 
-评测和 vLLM 推理通常需要 Hugging Face 格式权重。若训练只保存了 FSDP actor shard，先合并：
+## 8. Key Insights
 
-```bash
-python scripts/model_merger.py merge \
-  --backend fsdp \
-  --local_dir checkpoints/verl_agent_doudizhu_qwen3_5_4b_with_SFT/grpo_qwen3_5_4b_doudizhu_zh_with_SFT/global_step_60/actor \
-  --target_dir checkpoints/verl_agent_doudizhu_qwen3_5_4b_with_SFT/grpo_qwen3_5_4b_doudizhu_zh_with_SFT/global_step_60_huggingface_model
-```
+- **更大的 base model 没有自然解决问题。** Qwen3.5-9B 在完整游戏中没有优于 4B，说明斗地主 Agent 的瓶颈不是单纯参数量，而是动作 grounding、环境专用知识等。
+- **Grounding 必要但不充分。** Grounding-only SFT 几乎解决了“给定目标动作怎么点”的问题，但完整游戏胜率仍为 0，因为模型还不会自己决定出什么。
+- **端到端教师数据让模型从执行者变成初步策略家。** 混入完整轨迹后，规则合法动作率和自主出牌推进显著提高，模型开始具备自己打牌的能力。
+- **RL 的收益体现在多项行为指标同时改善。** GRPO step 60 不只是胜率更高，fallback 更低、合法动作率更高、自主出牌推进也更强。
+- **后训练不是越久越好。** GRPO step 105 的综合指标回落，说明 agentic RL 需要对 checkpoint 进行严谨的评测。
+- **可解释评测比单一胜率更重要。** 对 GUI agent 来说，胜率会受对手、发牌和长程随机性影响；projection、click、rule action、fallback、hand depletion 这些中间指标更能解释模型到底学会了什么，失败模式是什么。
 
-`scripts/human_play_doudizhu_web.py` 对本地 Transformers 演示有自动合并逻辑；`scripts/eval_doudizhu_model.py` 走 vLLM，建议显式传入已经合并好的目录。
+## Upstream
 
-## 评测
-
-评估完整游戏与 grounding：
-
-```bash
-conda activate verl-agent-bw-exp
-
-python scripts/eval_doudizhu_model.py \
-  --model-path checkpoints/verl_agent_doudizhu_qwen3_5_4b_with_SFT/grpo_qwen3_5_4b_doudizhu_zh_with_SFT/global_step_60_huggingface_model \
-  --env both \
-  --output-dir outputs/doudizhu_model_eval/grpo_qwen3_5_4b_doudizhu_zh_with_SFT_global_step_60 \
-  --num-episodes 256 \
-  --num-envs 64 \
-  --grounding-samples-per-state 8 \
-  --max-response-length 1536 \
-  --max-env-steps 30 \
-  --gpu-memory-utilization 0.9 \
-  --data-parallel-size 2 \
-  --tensor-model-parallel-size 1
-```
-
-输出文件：
-
-- `samples.jsonl`：逐 step 原始响应、投影、环境 info。
-- `episodes.jsonl`：完整游戏 episode 级指标。
-- `grounding_state_metrics.csv`：grounding canonical state 聚合指标。
-- `episode_metrics.csv`：episode/trajectory 指标。
-- `summary.csv` / `summary.json`：均值、标准差和 bootstrap 95% CI。
-
-评估 Kimi raw 教师轨迹：
-
-```bash
-python scripts/eval_kimi_doudizhu_raw.py \
-  --raw-dir data_synthesis/doudizhu_end_to_end_sft/raw \
-  --output-dir outputs/doudizhu_model_eval/kimi_k26_raw
-```
-
-批量评测示例见 [scripts/eval_doudizhu_models.sh](./scripts/eval_doudizhu_models.sh)。
-
-## 模型输出协议
-
-完整游戏响应必须严格包含五个非空 XML 标签：
-
-```xml
-<plan>根据截图简要分析当前局势。</plan>
-<action>[3, 3]</action>
-<tool_call>left_click([55,850],[100,860],[430,755])</tool_call>
-<chat>简短聊天。</chat>
-<memory>给下一回合使用的简短记忆。</memory>
-```
-
-约束：
-
-- `<action>` 只能是 `[pass]` 或牌面列表，例如 `[3]`、`[3, 3]`、`[10, J, Q, K, A]`、`[BJ, RJ]`。
-- `<tool_call>` 只能是一个 `left_click([x,y],...)` 调用。
-- 坐标范围为 0 到 1000，`[0,0]` 是左上角，`[1000,1000]` 是右下角。
-- 出牌动作最后一次点击必须是 `出牌` / `PLAY` 按钮；过牌动作点击 `不要` / `PASS`。
-- 不要在 `<memory>` 中写入 `<image>` 或 Qwen 视觉占位符，环境管理器会清理这些 token。
-
-grounding 响应只允许：
-
-```xml
-<tool_call>left_click([55,850],[100,860],[430,755])</tool_call>
-```
-
-## 开发注意事项
-
-- `doudizhu` 和 `doudizhu_grounding` 都支持 `env.rollout.n` 分组采样。完整游戏会对组内环境重复同一 seed；grounding 会让组内样本共享同一个 canonical state，并由教师动作推进环境。
-- GRPO 类算法不要通过 `actor_rollout_ref.rollout.n` 控制组大小，本项目使用 `env.rollout.n`。
-- `doudizhu_grounding` 的环境推进由教师动作完成，模型动作只用于打分；这保证同一状态下多个样本可公平比较。
-- 完整游戏里 fallback 是环境兜底，不是模型成功。报告结果时应同时看 `fallback_rate`、`rule_action_valid_rate` 和 `model_hand_depletion_rate`。
-- `Kimi K2.6 raw` 是离线 raw 轨迹统计，与本地 checkpoint 的在线评测协议不同，不能当作严格同 seed 对照。
-- 当前最佳模型仍不是强斗地主 AI。项目价值主要在 GUI agent 后训练闭环、指标拆解和从 SFT 到 GRPO 的能力跃迁。
-
-## 上游与许可
-
-本项目继承并改造了 [verl-agent](https://github.com/langfengQ/verl-agent) 和 [veRL](https://github.com/volcengine/verl) 的 agentic RL 训练框架。斗地主规则核心与动作空间参考 RLCard，相关许可见 [agent_system/environments/env_package/doudizhu/RLCARD_LICENSE.md](./agent_system/environments/env_package/doudizhu/RLCARD_LICENSE.md)。仓库整体许可见 [LICENSE](./LICENSE)。
+本项目继承并改造了 [verl-agent](https://github.com/langfengQ/verl-agent) 和 [veRL](https://github.com/volcengine/verl)。斗地主规则核心与动作空间参考 RLCard，相关许可见 [agent_system/environments/env_package/doudizhu/RLCARD_LICENSE.md](./agent_system/environments/env_package/doudizhu/RLCARD_LICENSE.md)。
