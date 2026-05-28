@@ -14,10 +14,6 @@
   <video src="https://github.com/user-attachments/assets/a2a855bb-d3eb-484c-9abd-8d536eca81a6" controls muted autoplay loop playsinline width="80%"></video>
 </p>
 
-<p align="center">
-  <a href="./demo.mp4">如果视频没有内嵌播放，点击查看 demo.mp4</a>
-</p>
-
 ## 当前结果
 
 主结果来自 `scripts/eval_doudizhu_model.py` 的在线环境评测。除 `kimi_k26_raw` 外，所有模型都在同一套本地 GUI 斗地主环境中运行；`kimi_k26_raw` 是端到端合成阶段的离线教师轨迹统计，适合作为教师数据源参考，不是严格 leaderboard 对照。
