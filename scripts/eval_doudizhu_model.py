@@ -37,7 +37,6 @@ from agent_system.environments.prompts.doudizhu_grounding import (
 )
 from agent_system.multi_turn_rollout.utils import process_image
 
-
 DOUDIZHU_METRICS = (
     "won",
     "total_reward",
@@ -325,6 +324,7 @@ def build_sampling_params(args: argparse.Namespace, n: int):
         "max_tokens": args.max_response_length,
         "n": n,
         "seed": args.seed,
+        "stop_token_ids": getattr(args, "stop_token_ids", None),
     }
     kwargs = supported_kwargs(SamplingParams, kwargs)
     return SamplingParams(**kwargs)
@@ -586,7 +586,7 @@ def run_doudizhu_wave(
     sample_rows: list[dict[str, Any]] = []
 
     try:
-        images, infos = env.reset(kwargs=[{"seed": int(seed)} for seed in episode_seeds])
+        images, _infos = env.reset(kwargs=[{"seed": int(seed)} for seed in episode_seeds])
         active = [True for _ in range(env_count)]
         memories = [initial_memory(args.language) for _ in range(env_count)]
         totals = [
@@ -696,7 +696,7 @@ def run_doudizhu_wave(
                 sample_rows.append(row)
 
             active = [active[idx] and not bool(dones[idx]) for idx in range(env_count)]
-            images, infos = next_images, step_infos
+            images = next_images
             if args.flush_every > 0 and (step_index + 1) % args.flush_every == 0:
                 sample_handle.flush()
 
@@ -909,7 +909,6 @@ def run_grounding_wave(
             for sample_index in range(group_n):
                 acc = trajectory_acc[env_index][sample_index]
                 num_states = int(acc["num_states"])
-                denom = max(num_states, 1)
                 last_info = dict(acc["last_info"])
                 truncated = bool(num_states >= args.max_env_steps and last_info.get("winner_id") is None)
                 episode_row = {
@@ -1068,12 +1067,13 @@ def main() -> None:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    tokenizer = import_tokenizer(args.model_path, args.trust_remote_code)
+    args.stop_token_ids = [int(tokenizer.eos_token_id)] if tokenizer.eos_token_id is not None else None
     (output_dir / "config.json").write_text(
         json.dumps(vars(args), indent=2, ensure_ascii=False, default=json_default),
         encoding="utf-8",
     )
 
-    tokenizer = import_tokenizer(args.model_path, args.trust_remote_code)
     print(
         f"vLLM parallelism: data_parallel_size={args.data_parallel_size}, "
         f"tensor_model_parallel_size={args.tensor_model_parallel_size}, "

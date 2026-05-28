@@ -12,15 +12,18 @@ from urllib.error import HTTPError, URLError
 # Usage
 # -----
 # This script starts a Gradio debugger for the Dou Dizhu GUI environment.
-# It has four pages:
+# It has six pages:
 #   1. Human play: manually click the observation image, then submit the clicks
 #      to the environment.
 #   2. Spectator mode: a VL model reads the screenshot and chooses the full
 #      card action and GUI clicks by itself.
-#   3. Commander mode: you type a semantic card action such as "3 3",
+#   3. Demo mode: the same spectator logic, with the main decision details
+#      shown beside the game and model/config controls kept below.
+#   4. Offline demo mode: replay a pre-collected best trajectory from disk.
+#   5. Commander mode: you type a semantic card action such as "3 3",
 #      "10 J Q K A", or "不要"; the model only converts that command into GUI
 #      clicks.
-#   4. Watch commander mode: a rule teacher chooses the semantic card action;
+#   6. Watch commander mode: a rule teacher chooses the semantic card action;
 #      the model converts that command into GUI clicks, while the game advances
 #      by the teacher action so you can watch grounding behavior.
 #
@@ -175,6 +178,8 @@ def ui(en: str, zh: str) -> str:
 
 MODE_HUMAN = ui("Human play", "人工游玩")
 MODE_SPECTATOR = ui("Spectator mode", "旁观模式")
+MODE_DEMO = ui("Demo mode", "演示模式")
+MODE_OFFLINE_DEMO = ui("Offline demo mode", "离线演示模式")
 MODE_COMMANDER = ui("Commander mode", "指挥模式")
 MODE_WATCH_COMMANDER = ui("Watch commander mode", "观看指挥模式")
 
@@ -183,6 +188,8 @@ def switch_mode(mode):
     return (
         gr.update(visible=mode == MODE_HUMAN),
         gr.update(visible=mode == MODE_SPECTATOR),
+        gr.update(visible=mode == MODE_DEMO),
+        gr.update(visible=mode == MODE_OFFLINE_DEMO),
         gr.update(visible=mode == MODE_COMMANDER),
         gr.update(visible=mode == MODE_WATCH_COMMANDER),
     )
@@ -193,6 +200,15 @@ current_clicks = []
 current_obs = None
 done = False
 env = DoudizhuSingleEnv(
+    seed=42,
+    env_config={
+        "doudizhu": {
+            "language": LANGUAGE,
+            "chinese_mode": CHINESE_MODE,
+        }
+    },
+)
+demo_env = DoudizhuSingleEnv(
     seed=42,
     env_config={
         "doudizhu": {
@@ -213,6 +229,13 @@ watch_commander_env = DoudizhuGroundingSingleEnv(
         },
     },
 )
+demo_obs = None
+demo_done = False
+demo_memory = INITIAL_MEMORY
+offline_demo_steps = []
+offline_demo_index = 0
+offline_demo_root = None
+offline_demo_meta = {}
 watch_commander_obs = None
 watch_commander_done = False
 spectator_agent = None
@@ -404,7 +427,11 @@ class DoudizhuSpectatorAgent:
             "max_new_tokens": int(max_new_tokens),
             "do_sample": bool(temperature and temperature > 0),
             "top_p": float(top_p),
+            "eos_token_id": self.tokenizer.eos_token_id,
+            "pad_token_id": self.tokenizer.pad_token_id,
         }
+        if generate_kwargs["pad_token_id"] is None:
+            generate_kwargs["pad_token_id"] = generate_kwargs["eos_token_id"]
         if generate_kwargs["do_sample"]:
             generate_kwargs["temperature"] = float(temperature)
 
@@ -723,6 +750,82 @@ def _format_clicks(clicks, obs: np.ndarray):
     return "\n".join(rows) if rows else "(no valid projected clicks)"
 
 
+def _format_demo_clicks(clicks):
+    rows = []
+    for idx, click in enumerate(clicks if isinstance(clicks, list) else []):
+        if not isinstance(click, (list, tuple)) or len(click) != 2:
+            continue
+        rows.append(f"{idx + 1}. [{float(click[0]):.1f}, {float(click[1]):.1f}]")
+    return "\n".join(rows) if rows else ui("(no valid projected clicks)", "（无有效解析点击）")
+
+
+def _pretty_env_action(env_obj, action):
+    if action is None or action == "":
+        return "-"
+    return env_obj._pretty_action(action)
+
+
+def _demo_initial_outputs(seed):
+    summary = ui(
+        f"Demo game reset with seed={seed}.\nLoad the model if needed, then run one model step or auto-play.",
+        f"演示游戏已重置，seed={seed}。\n如有需要请先加载模型，然后执行模型单步或自动运行。",
+    )
+    return summary, "-", "-", "-", ""
+
+
+def _format_demo_step_outputs(response, action, info, reward, obs_before, is_done):
+    fallback = bool(info.get("fallback_used", False))
+    projection_valid = bool(action.get("projection_valid", 0))
+    result = ui("Fallback move was executed", "已执行兜底动作") if fallback else ui("Valid move was executed", "已执行有效出牌")
+    game_state = ui("Game continues", "牌局继续")
+    if is_done:
+        won = bool(info.get("won", 0))
+        game_state = ui("Game over: Player 0 won" if won else "Game over: Player 0 lost", "游戏结束：玩家 0 赢了" if won else "游戏结束：玩家 0 输了")
+
+    summary = ui(
+        f"{result}\n"
+        f"Projection: {'valid' if projection_valid else 'invalid'}\n"
+        f"Click valid ratio: {info.get('click_valid_ratio', 0.0):.2f}\n"
+        f"Reward: {reward:.3f}\n"
+        f"{game_state}",
+        f"{result}\n"
+        f"标签解析：{'有效' if projection_valid else '无效'}\n"
+        f"点击有效比例：{info.get('click_valid_ratio', 0.0):.2f}\n"
+        f"奖励：{reward:.3f}\n"
+        f"{game_state}",
+    )
+
+    action_parse_ok = bool(action.get("action_tag_parse_ok", False))
+    action_parse_status = ui("success", "成功") if action_parse_ok else ui(f"failed: {action.get('action_tag_parse_error', '-')}", f"失败：{action.get('action_tag_parse_error', '-')}")
+    model_action = ui(
+        f"Raw <action>:\n{action.get('raw_action_text') or '-'}\n\n"
+        f"Parsed action:\n{action.get('normalized_action_text') or '-'}\n\n"
+        f"Parse status: {action_parse_status}",
+        f"原始 <action>：\n{action.get('raw_action_text') or '-'}\n\n"
+        f"解析动作：\n{action.get('normalized_action_text') or '-'}\n\n"
+        f"解析状态：{action_parse_status}",
+    )
+
+    env_action = ui(
+        f"Selected cards: {_pretty_env_action(demo_env, info.get('selected_cards'))}\n"
+        f"Submit kind: {info.get('submit_kind') or '-'}\n"
+        f"Executed action: {_pretty_env_action(demo_env, info.get('game_action'))}\n"
+        f"Fallback used: {'yes' if fallback else 'no'}",
+        f"选中的牌：{_pretty_env_action(demo_env, info.get('selected_cards'))}\n"
+        f"提交类型：{info.get('submit_kind') or '-'}\n"
+        f"实际执行动作：{_pretty_env_action(demo_env, info.get('game_action'))}\n"
+        f"是否兜底：{'是' if fallback else '否'}",
+    )
+
+    click_text = ui(
+        f"Raw <tool_call>:\n{action.get('raw_tool_call_text') or '-'}\n\n"
+        f"Parsed clicks:\n{_format_demo_clicks(action.get('clicks', []))}",
+        f"原始 <tool_call>：\n{action.get('raw_tool_call_text') or '-'}\n\n"
+        f"解析点击：\n{_format_demo_clicks(action.get('clicks', []))}",
+    )
+    return summary, model_action, env_action, click_text, response or ""
+
+
 def reset_env():
     global current_clicks, current_obs, done
     current_clicks = []
@@ -1030,6 +1133,274 @@ def spectator_auto_play(
             time.sleep(delay)
 
 
+def reset_demo(seed_value):
+    global demo_obs, demo_done, demo_memory, last_raw_response
+    demo_done = False
+    demo_memory = INITIAL_MEMORY
+    last_raw_response = ""
+    if seed_value is None or seed_value == "":
+        seed = int(np.random.randint(0, 100000))
+    else:
+        seed = int(seed_value)
+    demo_obs, _info = demo_env.reset(seed=seed)
+    summary, model_action, env_action, click_text, raw_response = _demo_initial_outputs(seed)
+    return demo_obs, demo_obs, summary, model_action, env_action, click_text, raw_response
+
+
+def _demo_step_core(
+    model_backend,
+    model_path,
+    auto_merge,
+    device_map,
+    torch_dtype,
+    api_base_url,
+    api_model,
+    api_key_env,
+    api_timeout,
+    api_thinking,
+    max_new_tokens,
+    temperature,
+    top_p,
+    enable_thinking,
+):
+    global demo_obs, demo_done, demo_memory, last_raw_response
+    if demo_obs is None:
+        demo_obs, _info = demo_env.reset(seed=int(np.random.randint(0, 100000)))
+        demo_done = False
+        demo_memory = INITIAL_MEMORY
+    if demo_done:
+        summary = ui("Game over. Reset demo game to continue.", "游戏已结束。请重置演示游戏后继续。")
+        return demo_obs, demo_obs, summary, "-", "-", "-", last_raw_response
+
+    obs_before = demo_obs.copy()
+    agent = _load_spectator_agent(
+        model_backend,
+        model_path,
+        bool(auto_merge),
+        device_map,
+        torch_dtype,
+        api_base_url,
+        api_model,
+        api_key_env,
+        api_timeout,
+        api_thinking,
+    )
+    response, action = agent.generate_action(
+        obs_before,
+        demo_memory,
+        max_new_tokens=int(max_new_tokens),
+        temperature=float(temperature),
+        top_p=float(top_p),
+        enable_thinking=bool(enable_thinking),
+    )
+    last_raw_response = response
+    overlay = annotate_clicks(obs_before, action.get("clicks", []))
+    demo_obs, reward, demo_done, info = demo_env.step(action)
+    if isinstance(action.get("memory"), str) and action["memory"].strip():
+        demo_memory = action["memory"].strip()
+    else:
+        demo_memory = info.get("memory", demo_memory)
+
+    summary, model_action, env_action, click_text, raw_response = _format_demo_step_outputs(
+        response=response,
+        action=action,
+        info=info,
+        reward=reward,
+        obs_before=obs_before,
+        is_done=demo_done,
+    )
+    return demo_obs, overlay, summary, model_action, env_action, click_text, raw_response
+
+
+def demo_step(model_backend, model_path, auto_merge, device_map, torch_dtype, api_base_url, api_model, api_key_env, api_timeout, api_thinking, max_new_tokens, temperature, top_p, enable_thinking):
+    try:
+        return _demo_step_core(
+            model_backend,
+            model_path,
+            auto_merge,
+            device_map,
+            torch_dtype,
+            api_base_url,
+            api_model,
+            api_key_env,
+            api_timeout,
+            api_thinking,
+            max_new_tokens,
+            temperature,
+            top_p,
+            enable_thinking,
+        )
+    except Exception as exc:
+        summary = ui(
+            f"Demo step failed:\n{type(exc).__name__}: {exc}",
+            f"演示单步失败：\n{type(exc).__name__}: {exc}",
+        )
+        fallback_obs = demo_obs if demo_obs is not None else np.zeros((480, 640, 3), dtype=np.uint8)
+        return fallback_obs, fallback_obs, summary, "-", "-", "-", last_raw_response
+
+
+def demo_auto_play(
+    model_backend,
+    model_path,
+    auto_merge,
+    device_map,
+    torch_dtype,
+    api_base_url,
+    api_model,
+    api_key_env,
+    api_timeout,
+    api_thinking,
+    max_new_tokens,
+    temperature,
+    top_p,
+    enable_thinking,
+    steps,
+    delay_seconds,
+):
+    total_steps = max(1, int(steps))
+    delay = max(0.0, float(delay_seconds))
+    for _idx in range(total_steps):
+        outputs = demo_step(
+            model_backend,
+            model_path,
+            auto_merge,
+            device_map,
+            torch_dtype,
+            api_base_url,
+            api_model,
+            api_key_env,
+            api_timeout,
+            api_thinking,
+            max_new_tokens,
+            temperature,
+            top_p,
+            enable_thinking,
+        )
+        yield outputs
+        if demo_done:
+            break
+        if delay > 0:
+            time.sleep(delay)
+
+
+def _offline_demo_fallback(message: str):
+    fallback_obs = demo_obs if demo_obs is not None else np.zeros((480, 640, 3), dtype=np.uint8)
+    return fallback_obs, fallback_obs, message, "-", "-", "-", ""
+
+
+def _load_offline_demo_image(root: Path, image_path: str):
+    path = Path(image_path)
+    if not path.is_absolute():
+        path = root / path
+    return np.array(Image.open(path).convert("RGB"), dtype=np.uint8)
+
+
+def _offline_demo_outputs():
+    if not offline_demo_steps:
+        return _offline_demo_fallback(ui("No offline demo is loaded.", "尚未加载离线演示。"))
+    step = offline_demo_steps[offline_demo_index]
+    root = offline_demo_root if isinstance(offline_demo_root, Path) else Path.cwd()
+    current_image = _load_offline_demo_image(root, step.get("current_image", ""))
+    overlay_image = _load_offline_demo_image(root, step.get("overlay_image", ""))
+    prefix = ui(
+        f"Offline demo step {offline_demo_index + 1}/{len(offline_demo_steps)}"
+        f" | seed={offline_demo_meta.get('best_seed', '-')}"
+        f" | total_reward={float(offline_demo_meta.get('best_total_reward', 0.0)):.3f}",
+        f"离线演示步骤 {offline_demo_index + 1}/{len(offline_demo_steps)}"
+        f" | seed={offline_demo_meta.get('best_seed', '-')}"
+        f" | 总奖励={float(offline_demo_meta.get('best_total_reward', 0.0)):.3f}",
+    )
+    summary = f"{prefix}\n{step.get('summary', '')}".strip()
+    return (
+        current_image,
+        overlay_image,
+        summary,
+        step.get("model_action", "-"),
+        step.get("env_action", "-"),
+        step.get("clicks", "-"),
+        step.get("raw_response", ""),
+    )
+
+
+def load_offline_demo(file_path):
+    global offline_demo_steps, offline_demo_index, offline_demo_root, offline_demo_meta
+    try:
+        path_text = (file_path or "").strip()
+        if not path_text:
+            path_text = "outputs/doudizhu_offline_demo/demo.json"
+        path = Path(path_text).expanduser()
+        if path.is_dir():
+            path = path / "demo.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        steps = payload.get("steps", [])
+        if not isinstance(steps, list) or not steps:
+            raise ValueError("Offline demo file has no steps.")
+        offline_demo_root = path.parent
+        offline_demo_steps = steps
+        offline_demo_index = 0
+        offline_demo_meta = {
+            "best_seed": payload.get("best_seed", "-"),
+            "best_total_reward": payload.get("best_total_reward", 0.0),
+            "best_episode_length": payload.get("best_episode_length", len(steps)),
+            "model_path": payload.get("model_path", ""),
+        }
+        return _offline_demo_outputs()
+    except Exception as exc:
+        return _offline_demo_fallback(
+            ui(
+                f"Load offline demo failed:\n{type(exc).__name__}: {exc}",
+                f"加载离线演示失败：\n{type(exc).__name__}: {exc}",
+            )
+        )
+
+
+def offline_demo_prev():
+    global offline_demo_index
+    try:
+        if not offline_demo_steps:
+            return _offline_demo_fallback(ui("No offline demo is loaded.", "尚未加载离线演示。"))
+        offline_demo_index = max(0, offline_demo_index - 1)
+        return _offline_demo_outputs()
+    except Exception as exc:
+        return _offline_demo_fallback(
+            ui(
+                f"Offline demo previous step failed:\n{type(exc).__name__}: {exc}",
+                f"离线上一步失败：\n{type(exc).__name__}: {exc}",
+            )
+        )
+
+
+def offline_demo_next():
+    global offline_demo_index
+    try:
+        if not offline_demo_steps:
+            return _offline_demo_fallback(ui("No offline demo is loaded.", "尚未加载离线演示。"))
+        offline_demo_index = min(len(offline_demo_steps) - 1, offline_demo_index + 1)
+        return _offline_demo_outputs()
+    except Exception as exc:
+        return _offline_demo_fallback(
+            ui(
+                f"Offline demo next step failed:\n{type(exc).__name__}: {exc}",
+                f"离线下一步失败：\n{type(exc).__name__}: {exc}",
+            )
+        )
+
+
+def offline_demo_auto_play(delay_seconds):
+    global offline_demo_index
+    delay = max(0.0, float(delay_seconds or 0.0))
+    if not offline_demo_steps:
+        yield _offline_demo_fallback(ui("No offline demo is loaded.", "尚未加载离线演示。"))
+        return
+    while offline_demo_index < len(offline_demo_steps):
+        yield _offline_demo_outputs()
+        if offline_demo_index >= len(offline_demo_steps) - 1:
+            break
+        offline_demo_index += 1
+        if delay > 0:
+            time.sleep(delay)
+
+
 def reset_commander(seed_value):
     global current_clicks, current_obs, done, last_raw_response
     current_clicks = []
@@ -1050,9 +1421,14 @@ def reset_commander(seed_value):
 
 
 def initialize_pages():
-    global spectator_memory, last_raw_response, watch_commander_obs, watch_commander_done
+    global spectator_memory, last_raw_response, demo_obs, demo_done, demo_memory, watch_commander_obs, watch_commander_done
     human_obs, human_status, clicks_json, human_memory = reset_env()
     spectator_memory = INITIAL_MEMORY
+    demo_memory = INITIAL_MEMORY
+    demo_done = False
+    demo_seed = int(np.random.randint(0, 100000))
+    demo_obs, _demo_info = demo_env.reset(seed=demo_seed)
+    demo_summary, demo_model_action, demo_env_action, demo_click_text, demo_raw_response = _demo_initial_outputs(demo_seed)
     last_raw_response = ""
     watch_commander_done = False
     watch_commander_obs, watch_info = watch_commander_env.reset(seed=int(np.random.randint(0, 100000)))
@@ -1060,6 +1436,10 @@ def initialize_pages():
     spectator_status = ui(
         "Game initialized. Load the model if needed, then click Agent Step or Auto-play.",
         "游戏已初始化。如有需要请先加载模型，然后点击“Agent 单步”或“自动运行”。",
+    )
+    offline_demo_status = ui(
+        "Load an offline demo JSON file to start playback.",
+        "加载离线演示 JSON 文件后开始播放。",
     )
     commander_status = ui(
         "Game initialized. Enter a semantic card command, then click Execute Command.",
@@ -1081,6 +1461,20 @@ def initialize_pages():
         spectator_status,
         "{}",
         spectator_memory,
+        demo_obs,
+        demo_obs,
+        demo_summary,
+        demo_model_action,
+        demo_env_action,
+        demo_click_text,
+        demo_raw_response,
+        human_obs,
+        human_obs,
+        offline_demo_status,
+        "-",
+        "-",
+        "-",
+        "",
         human_obs,
         human_obs,
         commander_status,
@@ -1422,10 +1816,10 @@ def watch_commander_auto_play(
             time.sleep(delay)
 
 
-with gr.Blocks(title=ui("Doudizhu Human, Commander, Watch, and Spectator Debugger", "斗地主人工、指挥、观看与旁观调试器"), theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title=ui("Doudizhu Human, Demo, Offline, Commander, Watch, and Spectator Debugger", "斗地主人工、演示、离线演示、指挥、观看与旁观调试器"), theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 斗地主 (Dou Dizhu) Agentic Environment")
     mode_selector = gr.Radio(
-        [MODE_HUMAN, MODE_SPECTATOR, MODE_COMMANDER, MODE_WATCH_COMMANDER],
+        [MODE_HUMAN, MODE_SPECTATOR, MODE_DEMO, MODE_OFFLINE_DEMO, MODE_COMMANDER, MODE_WATCH_COMMANDER],
         value=MODE_HUMAN,
         label=ui("Page", "页面"),
     )
@@ -1496,6 +1890,86 @@ with gr.Blocks(title=ui("Doudizhu Human, Commander, Watch, and Spectator Debugge
                 spectator_status = gr.Textbox(label=ui("Spectator Status", "旁观状态"), lines=12)
                 spectator_action_json = gr.Textbox(label=ui("Projected Action / Raw Response", "投影动作 / 原始响应"), lines=12, interactive=False)
                 spectator_memory_out = gr.Textbox(label=ui("Model Memory", "模型记忆"), lines=3, interactive=False)
+
+    with gr.Group(visible=False) as demo_page:
+        gr.Markdown(
+            ui(
+                "Demo view: watch the agent play while the most important model and environment decisions stay visible on the right.",
+                "演示视图：观看 agent 出牌，右侧只展示模型与环境决策的关键信息。",
+            )
+        )
+        with gr.Row():
+            with gr.Column(scale=3):
+                demo_overlay = gr.Image(interactive=False, label=ui("Last Model Click Overlay", "上一轮模型点击标注"))
+                demo_img = gr.Image(interactive=False, label=ui("Current Observation After Agent Move", "Agent 动作后的当前观察"))
+            with gr.Column(scale=2):
+                gr.HTML("<div style='height: clamp(40px, 6vh, 88px);'></div>")
+                with gr.Row():
+                    demo_summary = gr.Textbox(label=ui("1. Result", "1. 结论"), lines=6, interactive=False)
+                    demo_model_action = gr.Textbox(label=ui("2. Model Action", "2. 模型动作"), lines=6, interactive=False)
+                    demo_env_action = gr.Textbox(label=ui("3. Env Action", "3. 环境动作"), lines=6, interactive=False)
+                    demo_clicks = gr.Textbox(label=ui("4. Clicks", "4. 点击"), lines=6, interactive=False)
+                demo_raw_response = gr.Textbox(label=ui("5. Model Raw Response", "5. 模型原始响应"), lines=28, interactive=False)
+        with gr.Row():
+            demo_load_model_btn = gr.Button(ui("Load Model", "加载模型"))
+            demo_reset_btn = gr.Button(ui("Reset Demo Game", "重置演示游戏"))
+            demo_step_btn = gr.Button(ui("Model Step", "模型单步"), variant="primary")
+            demo_auto_btn = gr.Button(ui("Auto-play", "自动运行"))
+        with gr.Accordion(ui("Model and run settings", "模型与运行设置"), open=False):
+            demo_model_backend_in = gr.Dropdown(["local", "api"], label=ui("Model Backend", "模型后端"), value=ARGS.model_backend)
+            demo_model_path_in = gr.Textbox(label=ui("Model / Checkpoint Path", "模型 / checkpoint 路径"), value=ARGS.model_path)
+            demo_auto_merge_in = gr.Checkbox(label=ui("Auto-merge verl FSDP checkpoint if needed", "需要时自动合并 verl FSDP checkpoint"), value=not ARGS.no_auto_merge)
+            with gr.Row():
+                demo_device_map_in = gr.Textbox(label="device_map", value=ARGS.device_map)
+                demo_dtype_in = gr.Dropdown(["auto", "float16", "bfloat16", "float32"], label="torch_dtype", value=ARGS.torch_dtype)
+            demo_api_base_url_in = gr.Textbox(label=ui("API Base URL (OpenAI-compatible)", "API Base URL（OpenAI 兼容）"), value=ARGS.api_base_url)
+            demo_api_model_in = gr.Textbox(label=ui("API Model", "API 模型"), value=ARGS.api_model)
+            with gr.Row():
+                demo_api_key_env_in = gr.Textbox(label=ui("API Key Env", "API Key 环境变量"), value=ARGS.api_key_env)
+                demo_api_timeout_in = gr.Number(label=ui("API Timeout", "API 超时"), value=ARGS.api_timeout)
+                demo_api_thinking_in = gr.Dropdown(["default", "enabled", "disabled"], label="API thinking", value=ARGS.api_thinking)
+            with gr.Row():
+                demo_max_tokens_in = gr.Number(label="max_new_tokens", value=ARGS.max_new_tokens, precision=0)
+                demo_temp_in = gr.Number(label="temperature", value=ARGS.temperature)
+                demo_top_p_in = gr.Number(label="top_p", value=ARGS.top_p)
+            demo_enable_thinking_in = gr.Checkbox(
+                label="enable_thinking",
+                value=bool(ARGS.enable_thinking),
+            )
+            with gr.Row():
+                demo_seed_in = gr.Number(label=ui("Reset Seed (blank = random)", "重置 Seed（留空为随机）"), value=None, precision=0)
+                demo_auto_steps_in = gr.Number(label=ui("Auto steps", "自动步数"), value=10, precision=0)
+                demo_delay_in = gr.Number(label=ui("Delay seconds", "延迟秒数"), value=0.8)
+
+    with gr.Group(visible=False) as offline_demo_page:
+        gr.Markdown(
+            ui(
+                "Playback a pre-collected best trajectory from disk. Use `scripts/collect_doudizhu_offline_demo.py` to create the demo file.",
+                "从磁盘播放预先收集好的最佳轨迹。使用 `scripts/collect_doudizhu_offline_demo.py` 生成演示文件。",
+            )
+        )
+        with gr.Row():
+            with gr.Column(scale=3):
+                offline_overlay = gr.Image(interactive=False, label=ui("Last Model Click Overlay", "上一轮模型点击标注"))
+                offline_img = gr.Image(interactive=False, label=ui("Current Observation After Agent Move", "Agent 动作后的当前观察"))
+            with gr.Column(scale=2):
+                gr.HTML("<div style='height: clamp(40px, 6vh, 88px);'></div>")
+                with gr.Row():
+                    offline_summary = gr.Textbox(label=ui("1. Result", "1. 结论"), lines=6, interactive=False)
+                    offline_model_action = gr.Textbox(label=ui("2. Model Action", "2. 模型动作"), lines=6, interactive=False)
+                    offline_env_action = gr.Textbox(label=ui("3. Env Action", "3. 环境动作"), lines=6, interactive=False)
+                    offline_clicks = gr.Textbox(label=ui("4. Clicks", "4. 点击"), lines=6, interactive=False)
+                offline_raw_response = gr.Textbox(label=ui("5. Model Raw Response", "5. 模型原始响应"), lines=28, interactive=False)
+        with gr.Row():
+            offline_load_btn = gr.Button(ui("Load Offline Demo", "加载离线演示"))
+            offline_prev_btn = gr.Button(ui("Previous", "上一步"))
+            offline_next_btn = gr.Button(ui("Next", "下一步"), variant="primary")
+            offline_auto_btn = gr.Button(ui("Auto-play Offline", "自动播放离线"))
+            offline_delay_in = gr.Number(label=ui("Delay seconds", "延迟秒数"), value=0.8)
+        offline_demo_path_in = gr.Textbox(
+            label=ui("Offline demo JSON or directory", "离线演示 JSON 或目录"),
+            value="outputs/doudizhu_offline_demo/demo.json",
+        )
 
     with gr.Group(visible=False) as commander_page:
         gr.Markdown(
@@ -1588,7 +2062,7 @@ with gr.Blocks(title=ui("Doudizhu Human, Commander, Watch, and Spectator Debugge
     mode_selector.change(
         switch_mode,
         inputs=[mode_selector],
-        outputs=[human_page, spectator_page, commander_page, watch_commander_page],
+        outputs=[human_page, spectator_page, demo_page, offline_demo_page, commander_page, watch_commander_page],
     )
 
     img.select(handle_click, outputs=[status_out, clicks_out])
@@ -1607,6 +2081,20 @@ with gr.Blocks(title=ui("Doudizhu Human, Commander, Watch, and Spectator Debugge
             spectator_status,
             spectator_action_json,
             spectator_memory_out,
+            demo_img,
+            demo_overlay,
+            demo_summary,
+            demo_model_action,
+            demo_env_action,
+            demo_clicks,
+            demo_raw_response,
+            offline_img,
+            offline_overlay,
+            offline_summary,
+            offline_model_action,
+            offline_env_action,
+            offline_clicks,
+            offline_raw_response,
             commander_img,
             commander_overlay,
             commander_status,
@@ -1654,6 +2142,88 @@ with gr.Blocks(title=ui("Doudizhu Human, Commander, Watch, and Spectator Debugge
             delay_in,
         ],
         outputs=[spectator_img, spectator_overlay, spectator_status, spectator_action_json, spectator_memory_out],
+    )
+
+    demo_reset_btn.click(
+        reset_demo,
+        inputs=[demo_seed_in],
+        outputs=[demo_img, demo_overlay, demo_summary, demo_model_action, demo_env_action, demo_clicks, demo_raw_response],
+    )
+    demo_load_model_btn.click(
+        load_spectator_model,
+        inputs=[
+            demo_model_backend_in,
+            demo_model_path_in,
+            demo_auto_merge_in,
+            demo_device_map_in,
+            demo_dtype_in,
+            demo_api_base_url_in,
+            demo_api_model_in,
+            demo_api_key_env_in,
+            demo_api_timeout_in,
+            demo_api_thinking_in,
+        ],
+        outputs=[demo_summary],
+    )
+    demo_step_btn.click(
+        demo_step,
+        inputs=[
+            demo_model_backend_in,
+            demo_model_path_in,
+            demo_auto_merge_in,
+            demo_device_map_in,
+            demo_dtype_in,
+            demo_api_base_url_in,
+            demo_api_model_in,
+            demo_api_key_env_in,
+            demo_api_timeout_in,
+            demo_api_thinking_in,
+            demo_max_tokens_in,
+            demo_temp_in,
+            demo_top_p_in,
+            demo_enable_thinking_in,
+        ],
+        outputs=[demo_img, demo_overlay, demo_summary, demo_model_action, demo_env_action, demo_clicks, demo_raw_response],
+    )
+    demo_auto_btn.click(
+        demo_auto_play,
+        inputs=[
+            demo_model_backend_in,
+            demo_model_path_in,
+            demo_auto_merge_in,
+            demo_device_map_in,
+            demo_dtype_in,
+            demo_api_base_url_in,
+            demo_api_model_in,
+            demo_api_key_env_in,
+            demo_api_timeout_in,
+            demo_api_thinking_in,
+            demo_max_tokens_in,
+            demo_temp_in,
+            demo_top_p_in,
+            demo_enable_thinking_in,
+            demo_auto_steps_in,
+            demo_delay_in,
+        ],
+        outputs=[demo_img, demo_overlay, demo_summary, demo_model_action, demo_env_action, demo_clicks, demo_raw_response],
+    )
+    offline_load_btn.click(
+        load_offline_demo,
+        inputs=[offline_demo_path_in],
+        outputs=[offline_img, offline_overlay, offline_summary, offline_model_action, offline_env_action, offline_clicks, offline_raw_response],
+    )
+    offline_prev_btn.click(
+        offline_demo_prev,
+        outputs=[offline_img, offline_overlay, offline_summary, offline_model_action, offline_env_action, offline_clicks, offline_raw_response],
+    )
+    offline_next_btn.click(
+        offline_demo_next,
+        outputs=[offline_img, offline_overlay, offline_summary, offline_model_action, offline_env_action, offline_clicks, offline_raw_response],
+    )
+    offline_auto_btn.click(
+        offline_demo_auto_play,
+        inputs=[offline_delay_in],
+        outputs=[offline_img, offline_overlay, offline_summary, offline_model_action, offline_env_action, offline_clicks, offline_raw_response],
     )
 
     commander_reset_btn.click(
